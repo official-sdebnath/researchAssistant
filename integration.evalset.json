@@ -1,0 +1,67 @@
+{
+  "eval_set_id": "researcher_assistant_minimal_plus",
+  "eval_cases": [
+    {
+      "eval_id": "minimal_arxiv_search_and_summary_with_a2a",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "Find recent arXiv papers about \"federated learning\" and give a short 2-sentence summary."
+              }
+            ]
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "Recent federated learning research focuses on handling non-IID data and improving robustness and security (including defenses against adversarial and backdoor attacks), while also exploring decentralized and asynchronous training methods and server-free architectures. Additional work addresses interpretability, heterogeneous client environments, and extensions toward privacy-preserving or quantum federated optimizations."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "arxiv_search",
+                "args": {
+                  "query": "federated learning",
+                  "max_results": 5
+                }
+              },
+              {
+                "name": "remote_summarizer_tool",
+                "args": {
+                  "query": "Summarize these results in 2 sentences"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "eval_id": "empty_result_handling",
+      "conversation": [
+        {
+          "user_content": {
+            "parts": [
+              {
+                "text": "Find arXiv papers about \"qwertyuiop_nonexistent_topic_12345\" and summarize."
+              }
+            ]
+          },
+          "final_response": {
+            "parts": [
+              {
+                "text": "I couldn't find any relevant papers on arXiv for that query."
+              }
+            ]
+          },
+          "intermediate_data": {
+            "tool_uses": []
+          }
+        }
+      ]
+    }
+  ]
+}
