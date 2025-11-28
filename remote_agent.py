@@ -1,9 +1,7 @@
-# remote_agent.py
 import os
 import uuid
 import logging
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel
+from models.model import A2APayload
 from fastapi import FastAPI, HTTPException
 from google.adk.agents import LlmAgent
 from google.adk.models.google_llm import Gemini
@@ -22,19 +20,12 @@ logger = logging.getLogger("remote_summarizer")
 
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Simple request model for the A2A endpoint
-class A2APayload(BaseModel):
-    invocation_id: Optional[str] = None
-    sender: Optional[str] = None
-    query: str
-    docs: Optional[List[Dict[str, Any]]] = None  # optional prebuilt doc pieces
-
 app = FastAPI(title="remote-summarizer", version="0.1")
 
-# Local in-memory session service (isolated per-process)
+# Local in-memory session service
 session_service = InMemorySessionService()
 
-# Minimal remote summarizer agent: reuse similar instruction as your summarize_agent
+# Define the remote summarizer agent
 remote_summarizer_agent = LlmAgent(
     name="remote_summarizer_agent",
     model=Gemini(model=os.getenv("REMOTE_SUMMARIZER_MODEL", "gemini-2.5-flash-lite"), api_key=GOOGLE_API_KEY),
@@ -49,14 +40,9 @@ remote_summarizer_agent = LlmAgent(
     ),
 )
 
-# helper: robust extraction of text from Runner events (keeps parity with app._extract_agent_text)
 def extract_text_from_events(events) -> str:
     """
-    Robust extraction of human-facing text from ADK Runner events.
-    - Prefer parts[].text
-    - Then prefer parts[].function_response.response['summary'|'result_text'|'result'|'text'|'body']
-    - Then try to extract JSON from string dumps (largest object) and return its 'summary' if present
-    - Otherwise return the string representation (last non-empty event)
+    Extract plain text from a list of events returned by the Runner.
     """
 
     if events is None:
@@ -87,12 +73,12 @@ def extract_text_from_events(events) -> str:
             c = getattr(ev, "content", None)
             if c:
                 parts = getattr(c, "parts", None) or []
-                # prefer explicit text parts
+
                 for p in parts:
                     t = getattr(p, "text", None)
                     if t and isinstance(t, str) and t.strip():
                         return t.strip()
-                # then function_response objects
+
                 for p in parts:
                     fr = getattr(p, "function_response", None)
                     if fr:
@@ -111,7 +97,6 @@ def extract_text_from_events(events) -> str:
                                 if isinstance(parsed, dict) and parsed.get("summary"):
                                     return parsed.get("summary").strip()
                                 return s.strip()
-                # also try parts[].function_call payloads
                 for p in parts:
                     fc = getattr(p, "function_call", None)
                     if fc:
@@ -124,7 +109,6 @@ def extract_text_from_events(events) -> str:
                                 return parsed.get("summary").strip()
                         if s and len(s) > 10:
                             last_str_fallback = s
-            # other shapes
             if getattr(ev, "text", None):
                 t = getattr(ev, "text")
                 if t and isinstance(t, str) and t.strip():
@@ -139,7 +123,6 @@ def extract_text_from_events(events) -> str:
         parsed = try_parse_json_from_str(last_str_fallback)
         if isinstance(parsed, dict) and parsed.get("summary"):
             return parsed.get("summary").strip()
-        # handle MALFORMED_FUNCTION_CALL or function_call dumps
         if "MALFORMED_FUNCTION_CALL" in last_str_fallback or "function_call" in last_str_fallback:
             try:
                 sfull = str(events)
@@ -186,9 +169,7 @@ async def a2a_call(payload: A2APayload):
     else:
         events = res
 
-    # extract plain text (first-pass)
     result_text = extract_text_from_events(events) or ""
-    # If the model returned something that looks like JSON extract it robustly
     def extract_json_from_text(s: str):
         if not s:
             return None
@@ -196,7 +177,6 @@ async def a2a_call(payload: A2APayload):
             j = json.loads(s)
             return j
         except Exception:
-            # try to find JSON blob inside text
             cand = re.findall(r'(\{(?:.|\n)*\}|\[(?:.|\n)*\])', s)
             if not cand:
                 return None
@@ -210,7 +190,6 @@ async def a2a_call(payload: A2APayload):
 
     parsed = extract_json_from_text(result_text)
     if not parsed:
-        # last resort: scan entire events dump for embedded JSON
         parsed = extract_json_from_text(str(events))
 
     # Validate shape: must be dict and have either 'summary'+ 'papers' or an 'error'

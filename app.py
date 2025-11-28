@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from models.model import SearchRequest, SearchResponse, PaperItem
 import aiohttp
 from pinecone import Pinecone
 import os 
@@ -29,6 +29,8 @@ from google.adk.agents.base_agent import BaseAgent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_request import LlmRequest
 from google.adk.tools.function_tool import FunctionTool
+from google.adk.memory import InMemoryMemoryService
+from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 
 # Logger Invoked
 
@@ -41,8 +43,17 @@ logger = logging.getLogger("researcher_assistant")
 
 # ------------------ Initial Setup ------------------
 load_dotenv()
+
 # In-memory session service for ADK agents
 session_service = InMemorySessionService()
+
+# In-memory memory service for ADK agents
+memory_service = InMemoryMemoryService()
+
+preload_tool = PreloadMemoryTool()
+
+logger.info("preload_tool: %s", [n for n in dir(preload_tool) if not n.startswith("_")])
+logger.info("memory_service: %s", [n for n in dir(memory_service) if not n.startswith("_")])
 
 # ------------------------ Config ------------------------
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -57,11 +68,11 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not PINECONE_API_KEY:
     raise RuntimeError("Missing PINECONE_API_KEY in environment. Add to .env")
 
-ARXIV_API = "http://export.arxiv.org/api/query"
+ARXIV_API = "https://export.arxiv.org/api/query"
 
 app = FastAPI(
     title="Researcher Assistant",
-    version="minimal-fixed-upsert"
+    version="1.0"
 )
 
 app.add_middleware(
@@ -128,29 +139,6 @@ class CountInvocationPlugin(BasePlugin):
                 pass
         except Exception:
             logging.exception("[CountInvocationPlugin] after_model_callback error")
-
-# ---------------- Pydantic Models ---------------------
-
-class SearchRequest(BaseModel):
-    query: str = Field(..., description="Search query")
-    max_results: Optional[int] = Field(10, ge=1, le=50)
-
-class PaperItem(BaseModel):
-    id: str
-    title: str
-    abstract: Optional[str] = None
-    authors: List[str] = []
-    pdf_url: Optional[str] = None
-    published: Optional[datetime] = None
-    arxiv_url: Optional[str] = None
-
-class SearchResponse(BaseModel):
-    query: str
-    count: int
-    papers: List[PaperItem]
-    summary: Optional[str] = None
-    top_papers: Optional[List[PaperItem]] = None
-    top_paper_links: Optional[List[Dict[str, str]]] = None 
 
 # ---------------- arXiv Helpers ---------------------
 
@@ -363,7 +351,7 @@ async def remote_summarizer_tool(query: str, remote_url: Optional[str] = None, t
     - On success: {"summary": "...", "papers":[{"title":"...","url":"..."},...]}
     - On failure: {"error": "...", "raw": "..."}
     """
-    url = remote_url or os.getenv("http://localhost:9001/a2a")
+    url = "http://localhost:9001/a2a"
     payload = {
         "invocation_id": str(uuid.uuid4()),
         "sender": "ResearchCoordinator",
@@ -497,16 +485,17 @@ root_agent = LlmAgent(
         Workflow (STRICT):
         1) CALL the tool search_agent with the user's query to gather candidate papers.
         2) WAIT for its function_response containing titles & abstracts.
-        3a) After search_agent gives results (SEARCH_COMPLETE) or FINISHED, ensure you move to the second phase: CALL the remote_summarizer_tool. NEVER miss or forget to call remote_summarizer_tool.
-        3b) CALL the tool remote_summarizer_tool with a combined text (titles + abstracts) as 'query' to produce a structured JSON summary.
-           Example call: {"tool":"remote_summarizer_tool","query":"Title1 - Abstract1\\n\\nTitle2 - Abstract2 ..."}
+        3a) After search_agent gives results (SEARCH_COMPLETE) or FINISHED, ensure you move to the second phase: CALL the remote_summarizer_adk_tool. NEVER miss or forget to call remote_summarizer_adk_tool.
+        3b) CALL the tool remote_summarizer_adk_tool with a combined text (titles + abstracts) as 'query' to produce a structured JSON summary.
+           Example call: {"tool":"remote_summarizer_adk_tool","query":"Title1 - Abstract1\\n\\nTitle2 - Abstract2 ..."}
         4) WAIT for the remote summarizer's function_response (it will return structured JSON with keys 'summary' and 'papers').
         5) Extract the summary and links from summary agent and show the response (summary and papers) in the UI in a human readable format.
  
             """,
     tools=[
         AgentTool(search_agent),
-        FunctionTool(func=remote_summarizer_adk_tool)
+        FunctionTool(func=remote_summarizer_adk_tool),
+        preload_tool
     ],
 )
 
@@ -589,9 +578,82 @@ async def search_papers(req: SearchRequest):
             agent=root_agent,
             app_name="agents",
             session_service=session_service,
+            memory_service=memory_service,
             plugins=[LoggingPlugin(), CountInvocationPlugin()],
         )
-        asyncio.create_task(runner.run_debug(f"User query: {q}\n\n{"Please follow the instrcutions carefully"}"))
+        async def _run_and_persist_session(runner: Runner, session_obj, user_text: str):
+            final_response_text = None
+            events_seen = []
+            try:
+                content = types.Content(role="user", parts=[types.Part(text=user_text)])
+
+                async for event in runner.run_async(
+                    user_id=session_obj.user_id,
+                    session_id=session_obj.id,
+                    new_message=content,
+                ):
+                    # Collect a compact representation for debugging/inspection
+                    try:
+                        ev_repr = {
+                            "id": getattr(event, "id", None),
+                            "author": getattr(event, "author", None),
+                            "type": getattr(event, "type", None),
+                        }
+                        # try to capture text content if present (defensive)
+                        if getattr(event, "content", None) and getattr(event.content, "parts", None):
+                            ev_repr["text_snippet"] = (event.content.parts[0].text or "")[:500]
+                        events_seen.append(ev_repr)
+                        logger.info("runner event: %s", ev_repr)
+                    except Exception:
+                        logger.exception("error serializing event")
+
+                    # detect final response events (ADK event shapes vary; be defensive)
+                    try:
+                        if getattr(event, "is_final_response", None) and callable(event.is_final_response) and event.is_final_response():
+                            if getattr(event, "content", None) and getattr(event.content, "parts", None):
+                                final_response_text = event.content.parts[0].text
+                            break
+                        # fallback heuristic: if event has .final == True or author == agent and content with text
+                        if getattr(event, "final", False):
+                            final_response_text = getattr(event.content.parts[0], "text", final_response_text) or final_response_text
+                            break
+                    except Exception:
+                        logger.exception("error checking final response")
+
+            except Exception:
+                logger.exception("_run_and_persist_session: runner error")
+            finally:
+                # Persist session
+                try:
+                    if hasattr(memory_service, "add_session_to_memory"):
+                        await memory_service.add_session_to_memory(session_obj)
+                        logger.info("session persisted to memory: user_id=%s session_id=%s", session_obj.user_id, session_obj.id)
+                    else:
+                        logger.warning("memory_service missing add_session_to_memory; skipping persist")
+                except Exception:
+                    logger.exception("persisting session to memory failed (non-fatal)")
+
+                # Attach events and final text to app.state.last_agent_output for UI/debug
+                try:
+                    cur = getattr(app.state, "last_agent_output", {}) or {}
+                    cur.update({
+                        "agent_events": events_seen[-20:],  # keep last 20 events
+                        "agent_final_text": (final_response_text or cur.get("agent_final_text")),
+                        "agent_session_id": getattr(session_obj, "id", None),
+                    })
+                    app.state.last_agent_output = cur
+                    logger.info("attached runner events/final_text to last_agent_output (events=%d, final_present=%s)",
+                                len(events_seen), bool(final_response_text))
+                except Exception:
+                    logger.exception("failed to attach runner events to last_agent_output")
+
+            return final_response_text
+
+
+        # create a session explicitly so add_session_to_memory has a session object to operate on
+        session = await session_service.create_session(app_name=runner.app_name or "agents", user_id=str(uuid.uuid4()))
+        # schedule background run that will persist the session to memory when finished
+        asyncio.create_task(_run_and_persist_session(runner, session, f"User query: {q}\n\nPlease follow the instructions carefully"))
     except Exception:
         logging.exception("Failed to start runner (non-fatal)")
 
