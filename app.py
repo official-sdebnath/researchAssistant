@@ -18,11 +18,10 @@ import logging
 import time
 # Google adk based libraries
 from google.genai import types
-from google.adk.agents import LlmAgent
+from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.models.google_llm import Gemini
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
-from google.adk.tools import AgentTool
 from google.adk.plugins.logging_plugin import LoggingPlugin
 from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.agents.base_agent import BaseAgent
@@ -57,18 +56,19 @@ logger.info("memory_service: %s", [n for n in dir(memory_service) if not n.start
 
 # ------------------------ Config ------------------------
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX = os.getenv("PINECONE_INDEX", "researcher-assistant")
-PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
-PINECONE_CLOUD = os.getenv("PINECONE_CLOUD", "aws")
-PINECONE_MODEL = os.getenv("PINECONE_MODEL", "llama-text-embed-v2")
-APP_EMBED_DIM = int(os.getenv("EMBEDDING_DIMENSION", "1024"))
-
+PINECONE_INDEX = os.getenv("PINECONE_INDEX")
+PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT")
+PINECONE_CLOUD = os.getenv("PINECONE_CLOUD")
+PINECONE_MODEL = os.getenv("PINECONE_MODEL")
+APP_EMBED_DIM = int(os.getenv("EMBEDDING_DIMENSION"))
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+ARXIV_API = os.getenv("ARXIV_API")
 
 if not PINECONE_API_KEY:
     raise RuntimeError("Missing PINECONE_API_KEY in environment. Add to .env")
 
-ARXIV_API = "https://export.arxiv.org/api/query"
+if not GOOGLE_API_KEY:
+    raise RuntimeError("Missing GOOGLE_API_KEY in environment. Add to .env")
 
 app = FastAPI(
     title="Researcher Assistant",
@@ -216,10 +216,13 @@ def sanitize_metadata_for_pinecone(meta: Dict[str, Any]) -> Dict[str, Any]:
 
 def prepare_and_upsert(dense_index, records: List[dict], namespace: str = "default"):
     """
-    Upserts using the index's field_map to pick the text field name.
-    Builds records like: {"_id": "...", "<text_field>": "...", <meta fields> }
-    and calls dense_index.upsert_records(namespace, records_payload).
-    Also mirrors upserted records into app.state._local_index[namespace] for cheap local retrieval.
+    Upserts records into Pinecone. Builds records like:
+      {"_id": "...", "<text_field>": "...", <meta fields> }
+
+    This version DOES NOT mirror into a local in-process index.
+    It tries to call common SDK methods in a defensive manner:
+      - upsert_records (text-based, integrated-embedding)
+      - upsert (vector-based)
     """
     if not records:
         return {"ok": True, "note": "no records"}
@@ -236,7 +239,7 @@ def prepare_and_upsert(dense_index, records: List[dict], namespace: str = "defau
 
         # Build the record with the correct text field name
         r = {"_id": str(rid), text_field: str(text)}
-        # Merge metadata as top-level keys
+        # Merge metadata as top-level keys (avoid collisions)
         for k, v in meta.items():
             if k in ("_id", text_field):
                 r[f"meta_{k}"] = v
@@ -244,89 +247,83 @@ def prepare_and_upsert(dense_index, records: List[dict], namespace: str = "defau
                 r[k] = v
         records_payload.append(r)
 
-    # ------------------ Mirror into local index ------------------
     try:
-        local = getattr(app.state, "_local_index", None)
-        if local is None:
-            app.state._local_index = {}
-            local = app.state._local_index
-        ns_list = local.get(namespace, [])
-        existing_ids = {r.get("_id") for r in ns_list}
-        for r in records_payload:
-            if r.get("_id") not in existing_ids:
-                ns_list.append(r)
-        local[namespace] = ns_list
-    except Exception:
-        pass
-
-    try:
-        # signature: upsert_records (namespace, records)
-        return dense_index.upsert_records(namespace, records_payload) or {"ok": True, "count": len(records_payload)}
+        # Try to call the high-level "upsert_records" (text-based upsert) if present.
+        if hasattr(dense_index, "upsert_records"):
+            return dense_index.upsert_records(namespace, records_payload) or {"ok": True, "count": len(records_payload)}
+        # Fallback to vector upsert if that method is available (older/newer SDKs)
+        if hasattr(dense_index, "upsert"):
+            # The vector upsert expects (id, vector, metadata). We don't have a vector here,
+            # so prefer upsert_records. If you're using integrated-embedding indexes, upsert_records is preferred.
+            # If dense_index.upsert is used, the calling code must supply vectors; here we raise an informative error.
+            raise RuntimeError("Index supports 'upsert' (vector upsert) but no vectors provided. Use integrated-embedding index or supply vectors.")
+        # Finally, try generic upsert_records signature if index object itself offers one
+        if callable(getattr(dense_index, "upsert_records", None)):
+            return dense_index.upsert_records(namespace, records_payload) or {"ok": True, "count": len(records_payload)}
+        return {"ok": False, "error": "no_supported_upsert_method_on_index"}
     except Exception as e:
-        print("Pinecone upsert failed:", str(e))
+        logging.exception("Pinecone upsert failed")
         return {"ok": False, "error": str(e)}
 
 def retrieve_from_pinecone(query: str, top_k: int = 5, namespace: str = "arxiv") -> List[dict]:
     """
-    Picks the best text field available (prefers 'text', then field_map's text field, then title, then first string).
-    Returns list of dicts: {id, text, metadata}
+    Query the Pinecone index using text or vector search and return list of:
+      { "id": <id>, "text": <picked_text>, "metadata": {...} }
+
+    This function is defensive across SDK versions:
+     - Prefers `search_records` / `search` / `query`-style methods that accept query text or vector
+     - Falls back to returning [] if index is not available
     """
     if not query:
         return []
 
-    local = getattr(app.state, "_local_index", {}) or {}
-    candidates = local.get(namespace, []) 
-    if not candidates:
+    idx = getattr(app.state, "dense_index", None)
+    if idx is None:
         return []
 
-    def pick_text(rec: Dict[str, Any]) -> str:
+    # Decide which method to call depending on the SDK
+    try:
+        # 1) If index exposes search_records (text/record search), use it
+        if hasattr(idx, "search_records"):
+            # Many Pinecone SDKs accept: search_records(query=..., top_k=..., namespace=...)
+            resp = idx.search_records(query=query, top_k=top_k, namespace=namespace)
+            hits = getattr(resp, "matches", None) or resp.get("matches", []) if isinstance(resp, dict) else resp
+            results = []
+            for h in hits[:top_k]:
+                # adapt to match object shapes
+                metadata = getattr(h, "metadata", None) or h.get("metadata", {}) if isinstance(h, dict) else {}
+                text = (
+                    getattr(h, "record", None) and getattr(h.record, "text", None)
+                ) or h.get("record", {}).get("text") if isinstance(h, dict) else None
+                # fallback to metadata title or other fields
+                if not text:
+                    text = metadata.get("title") or metadata.get("abstract") or ""
+                results.append({"id": getattr(h, "id", None) or h.get("id"), "text": text, "metadata": dict(metadata)})
+            return results
 
-        if isinstance(rec.get("text"), str) and rec.get("text"):
-            return rec["text"]
-    
-        field_map = getattr(app.state, "field_map", {}) or {}
-        text_field = field_map.get("text")
-        if text_field and isinstance(rec.get(text_field), str) and rec.get(text_field):
-            return rec[text_field]
-       
-        if isinstance(rec.get("title"), str) and rec.get("title"):
-            return rec["title"]
+        # 2) If index has query or search method accepting vectors/text, call query/search
+        if hasattr(idx, "query") or hasattr(idx, "search"):
+            # Some SDKs expose `query` which expects a vector OR a record id.
+            # Newer docs also provide `search_records` for text-based search; we've tried that above.
+            # As we don't have an embedding client here, try a text-based search call where supported.
+            if hasattr(idx, "search"):
+                resp = idx.search(query=query, top_k=top_k, namespace=namespace)
+            else:
+                resp = idx.query(query=query, top_k=top_k, namespace=namespace)
+            # resp shape varies: adapt by looking for 'matches' or 'results'
+            matches = getattr(resp, "matches", None) or resp.get("matches", []) if isinstance(resp, dict) else resp
+            out = []
+            for m in matches[:top_k]:
+                meta = getattr(m, "metadata", None) or m.get("metadata", {}) if isinstance(m, dict) else {}
+                text = meta.get("title") or meta.get("abstract") or (m.get("text") if isinstance(m, dict) else "")
+                out.append({"id": getattr(m, "id", None) or m.get("id"), "text": text, "metadata": dict(meta)})
+            return out
 
-        for k, v in rec.items():
-            if k == "_id" or k.startswith("meta_"):
-                continue
-            if isinstance(v, str) and v:
-                return v
-        
-        pieces = [v for k, v in rec.items() if isinstance(v, str) and k != "_id"]
-        return " ".join(pieces)[:3000]
-
-    q = query.lower().strip()
-    scored = []
-    for rec in candidates:
-        text = (pick_text(rec) or "").lower()
-        title = (rec.get("title") or "").lower()
-        score = 0
-        if q in text:
-            score += 3
-        if q in title:
-            score += 4
-        q_words = set(q.split())
-        overlap = len(q_words.intersection(set((text + " " + title).split())))
-        score += overlap * 0.2
-        scored.append((score, rec))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    results = [r for s, r in scored][:top_k]
-    out = []
-    for r in results:
-        out.append({
-            "id": r.get("_id"),
-            "text": pick_text(r),
-            "metadata": {k: v for k, v in r.items() if k not in ("_id",)}
-        })
-    return out
-
+        # 3) No supported search API found
+        return []
+    except Exception:
+        logging.exception("retrieve_from_pinecone failed")
+        return []
 # ------------------ Generic Helpers ------------------
     
 async def timed_async(fn, *args, metric_key: str = None, **kwargs):
@@ -345,7 +342,7 @@ async def timed_async(fn, *args, metric_key: str = None, **kwargs):
         pass
     return res
 
-async def remote_summarizer_tool(query: str, remote_url: Optional[str] = None, timeout_sec: int = 25) -> dict:
+async def remote_summary_extract(query: str, remote_url: Optional[str] = None, timeout_sec: int = 25) -> dict:
     """
     Calls the remote A2A summarizer and returns a validated dict:
     - On success: {"summary": "...", "papers":[{"title":"...","url":"..."},...]}
@@ -365,7 +362,7 @@ async def remote_summarizer_tool(query: str, remote_url: Optional[str] = None, t
                 resp.raise_for_status()
                 data = await resp.json()
     except Exception as e:
-        logging.exception("[remote_summarizer_tool] a2a call failed")
+        logging.exception("[remote_summary_extract] a2a call failed")
         try:
             app.state.metrics = getattr(app.state, "metrics", {})
             app.state.metrics["a2a_summarizer_ms"] = (time.perf_counter() - start) * 1000.0
@@ -413,13 +410,12 @@ async def remote_summarizer_tool(query: str, remote_url: Optional[str] = None, t
         return {"summary": result.get("summary").strip(), "papers": papers}
     return {"error": "remote_result_missing_fields", "raw": result}
 
-
-async def remote_summarizer_adk_tool(args: dict, tool_context=None):
+async def summarizer(args: dict, tool_context=None):
     """
-    ADK will call this with a dict payload. Normalize it and call your existing remote_summarizer_tool.
+    ADK will call this with a dict payload. Normalize it and call your existing remote_summary_extract.
     Return both structured 'result' and 'content.parts[0].text' with a human-friendly summary + top-5 list.
     """
-    logging.info("[remote_summarizer_adk_tool] invoked; args_len=%d", len(str(args or "")))
+    logging.info("[summarizer] invoked; args_len=%d", len(str(args or "")))
     try:
         if not isinstance(args, dict):
             q = args if isinstance(args, str) else ""
@@ -430,7 +426,7 @@ async def remote_summarizer_adk_tool(args: dict, tool_context=None):
             remote_url = args.get("remote_url") or None
             timeout_sec = int(args.get("timeout_sec", 25))
 
-        result = await remote_summarizer_tool(q, remote_url=remote_url, timeout_sec=timeout_sec)
+        result = await remote_summary_extract(q, remote_url=remote_url, timeout_sec=timeout_sec)
 
         if isinstance(result, dict) and result.get("summary"):
             sb = (result.get("summary") or "").strip()
@@ -460,7 +456,7 @@ async def remote_summarizer_adk_tool(args: dict, tool_context=None):
         }
 
     except Exception as e:
-        logging.exception("remote_summarizer_adk_tool error")
+        logging.exception("summarizer error")
         err = {"error": "wrapper_exception", "raw": str(e)}
         return {"ok": False, "result": err, "content": {"parts": [{"text": json.dumps(err, ensure_ascii=False)}]}}
 
@@ -470,33 +466,35 @@ search_agent = LlmAgent(
     name="arxiv_search_agent",
     model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config, api_key=GOOGLE_API_KEY),
     instruction="""
-    You are an assistant whose job is to return a machine-readable list of arXiv papers for the given query uisng the assigned tool. 
-    After gathering the relevant papers, respond with
-    **SEARCH_COMPLETE**
-""",
+        Call the provided tool `arxiv_search` with the user's query and RETURN ONLY the tool/function RESPONSE OBJECT (no additional commentary or text).
+        Do NOT emit any final text like "SEARCH COMPLETE" or other human-readable confirmations.
+        The tool response will be consumed by the next agent.
+    """,
     tools=[arxiv_search],
+    description="Search arXiv and write structured results to state",
+    output_key="arxiv_candidates",
 )
 
-root_agent = LlmAgent(
-    name="ResearchCoordinator",
+
+final_agent = LlmAgent(
+    name="final_summarizer_agent",
     model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config, api_key=GOOGLE_API_KEY),
     instruction="""
-        You are ResearchCoordinator.
-        Workflow (STRICT):
-        1) CALL the tool search_agent with the user's query to gather candidate papers.
-        2) WAIT for its function_response containing titles & abstracts.
-        3a) After search_agent gives results (SEARCH_COMPLETE) or FINISHED, ensure you move to the second phase: CALL the remote_summarizer_adk_tool. NEVER miss or forget to call remote_summarizer_adk_tool.
-        3b) CALL the tool remote_summarizer_adk_tool with a combined text (titles + abstracts) as 'query' to produce a structured JSON summary.
-           Example call: {"tool":"remote_summarizer_adk_tool","query":"Title1 - Abstract1\\n\\nTitle2 - Abstract2 ..."}
-        4) WAIT for the remote summarizer's function_response (it will return structured JSON with keys 'summary' and 'papers').
-        5) Extract the summary and links from summary agent and show the response (summary and papers) in the UI in a human readable format.
- 
-            """,
+        You are final_summarizer_agent.
+        Your job is to CALL the summarizer with a combined text (titles + abstracts) as 'query' to produce a structured JSON summary.
+        Example call: {"tool":"summarizer","query":"Title1 - Abstract1\\n\\nTitle2 - Abstract2 ..."}
+        WAIT for the remote summarizer's function_response (it will return structured JSON with keys 'summary', 'papers' and 'url').
+        Extract the summary and links from summary agent and show the response (summary and papers including URLs) in the UI in a human readable format.
+    """,
     tools=[
-        AgentTool(search_agent),
-        FunctionTool(func=remote_summarizer_adk_tool),
-        preload_tool
+        FunctionTool(func=summarizer)
     ],
+)
+
+root_agent = SequentialAgent(
+    name="ResearchCoordinator",
+    sub_agents=[search_agent, final_agent],
+    description="Sequentially run search_agent then final_summarizer_agent"
 )
 
 # ---------------- Lifespan ---------------------
@@ -537,7 +535,6 @@ async def lifespan(app: FastAPI):
         app.state.pinecone_client = pc
         app.state.dense_index = pc.Index(PINECONE_INDEX)
         app.state.field_map = field_map
-        app.state._local_index = getattr(app.state, "_local_index", {})
 
         # minimal metrics slot
         app.state.metrics = getattr(app.state, "metrics", {})
@@ -606,6 +603,17 @@ async def search_papers(req: SearchRequest):
                         logger.info("runner event: %s", ev_repr)
                     except Exception:
                         logger.exception("error serializing event")
+                    
+                    try:
+                        # log last 10 full events for inspection (not just snippets)
+                        logger.info("DEBUG: last runner events (full) for session=%s", session_obj.id)
+                        # if runner yields event objects, write their reprs
+                        for ev in events_seen[-20:]:
+                            logger.info("DEBUG_EVENT: %s", ev)
+                        # additionally, inspect app.state.last_agent_output
+                        logger.info("DEBUG last_agent_output: %s", json.dumps(app.state.last_agent_output.get('agent_final_text') or "", ensure_ascii=False)[:4000])
+                    except Exception:
+                        logger.exception("failed to dump runner events")
 
                     # detect final response events (ADK event shapes vary; be defensive)
                     try:
@@ -646,6 +654,14 @@ async def search_papers(req: SearchRequest):
                                 len(events_seen), bool(final_response_text))
                 except Exception:
                     logger.exception("failed to attach runner events to last_agent_output")
+                
+                final_text = app.state.last_agent_output.get("agent_final_text", "")
+                try:
+                    parsed = json.loads(final_text)
+                    logger.info("FINAL_AGENT_JSON_OK: keys=%s", list(parsed.keys()))
+                except Exception as e:
+                    logger.warning("FINAL_AGENT_JSON_PARSE_FAILED: %s; snippet=%s", str(e), final_text[:1000])
+
 
             return final_response_text
 
@@ -672,7 +688,7 @@ async def search_papers(req: SearchRequest):
     combined = "Summarize these papers in 1-3 sentences and return JSON with keys 'summary' and 'papers' (title+url):\n\n"
     combined += ("\n".join(parts) if parts else q)
 
-    summarizer_result = await remote_summarizer_tool(combined, remote_url=None, timeout_sec=30)
+    summarizer_result = await remote_summary_extract(combined, remote_url=None, timeout_sec=30)
 
     try:
         raw_text = json.dumps(summarizer_result, ensure_ascii=False)
@@ -825,10 +841,7 @@ async def clear_namespace(namespace: str = Body("arxiv", embed=True)):
         except TypeError:
             
             idx.delete(delete_all=True)
-    
-        if hasattr(app.state, "_local_index"):
-            app.state._local_index.pop(namespace, None)
-        return {"ok": True, "namespace": namespace, "note": "delete_all issued; local mirror cleared"}
+        return {"ok": True, "note": f"cleared namespace {namespace}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
