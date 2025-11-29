@@ -1,0 +1,2 @@
+2025-11-29 20:21:15,890 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-11-29 20:21:15,891 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']

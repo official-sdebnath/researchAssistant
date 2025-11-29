@@ -49,7 +49,7 @@ This repo demonstrates the important agent concepts required by the Kaggle's Goo
 ## Architecture
 
 
-![Project Flow Diagram](imgs/image.png)
+![Project Flow Diagram](image.png)
 
 
 Purpose of project files:
