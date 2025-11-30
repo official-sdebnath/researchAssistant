@@ -1,22 +1,20 @@
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Body
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from models.model import SearchRequest, SearchResponse, PaperItem
 import aiohttp
-from pinecone import Pinecone
-import os 
-import uuid 
-import json 
+import os
+import uuid
+import json
 import asyncio
-from typing import List, Optional, Dict, Any
-from datetime import datetime   
+from typing import List, Optional, Any
+from datetime import datetime
 from contextlib import asynccontextmanager
 import feedparser
-from datetime import date
 import uvicorn
 import logging
 import time
-# Google adk based libraries
+# ADK / Google GenAI libraries
 from google.genai import types
 from google.adk.agents import LlmAgent, SequentialAgent
 from google.adk.models.google_llm import Gemini
@@ -31,70 +29,54 @@ from google.adk.tools.function_tool import FunctionTool
 from google.adk.memory import InMemoryMemoryService
 from google.adk.tools.preload_memory_tool import PreloadMemoryTool
 
-# Logger Invoked
-
+# ---------------- Logging ----------------
 logging.basicConfig(
     filename="logger.log",
-    level=logging.INFO,  
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("researcher_assistant")
 
-# ------------------ Initial Setup ------------------
+# ---------------- Environment / setup ----------------
 load_dotenv()
 
-# In-memory session service for ADK agents
+# In-memory session and memory services (suitable for demo / prototype)
 session_service = InMemorySessionService()
-
-# In-memory memory service for ADK agents
 memory_service = InMemoryMemoryService()
-
 preload_tool = PreloadMemoryTool()
 
 logger.info("preload_tool: %s", [n for n in dir(preload_tool) if not n.startswith("_")])
 logger.info("memory_service: %s", [n for n in dir(memory_service) if not n.startswith("_")])
 
-# ------------------------ Config ------------------------
-PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-PINECONE_INDEX = os.getenv("PINECONE_INDEX")
-PINECONE_ENVIRONMENT = os.getenv("PINECONE_ENVIRONMENT")
-PINECONE_CLOUD = os.getenv("PINECONE_CLOUD")
-PINECONE_MODEL = os.getenv("PINECONE_MODEL")
-APP_EMBED_DIM = int(os.getenv("EMBEDDING_DIMENSION"))
+# Config from environment
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 ARXIV_API = os.getenv("ARXIV_API")
-
-if not PINECONE_API_KEY:
-    raise RuntimeError("Missing PINECONE_API_KEY in environment. Add to .env")
 
 if not GOOGLE_API_KEY:
     raise RuntimeError("Missing GOOGLE_API_KEY in environment. Add to .env")
 
-app = FastAPI(
-    title="Researcher Assistant",
-    version="1.0"
-)
+app = FastAPI(title="Researcher Assistant", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
-    allow_methods=["GET","POST","OPTIONS"],
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
+# Retry options for LLM HTTP calls
 retry_config = types.HttpRetryOptions(
-    attempts=5,  # Maximum retry attempts
-    exp_base=7,  # Delay multiplier
+    attempts=5,
+    exp_base=7,
     initial_delay=1,
-    http_status_codes=[429, 500, 503, 504],  # Retry on these HTTP errors
+    http_status_codes=[429, 500, 503, 504],
 )
 
-# ---------------- Plugins ---------------------
-
+# ---------------- Plugin: basic invocation / timing metrics ----------------
 class CountInvocationPlugin(BasePlugin):
     """
-    Counts agent runs and LLM requests, records timings,
-    and writes simple metrics to app.state.metrics (app-scoped).
+    Simple plugin to count agent runs and LLM requests and record simple timing metrics
+    into app.state.metrics for observability.
     """
     def __init__(self) -> None:
         super().__init__(name="count_invocation")
@@ -116,7 +98,7 @@ class CountInvocationPlugin(BasePlugin):
             m["agent_count"] = self.agent_count
             app.state.metrics = m
         except Exception:
-            logging.exception("[CountInvocationPlugin] failed to write agent_count to app.state.metrics")
+            logging.exception("failed to write agent_count to app.state.metrics")
 
     async def after_agent_callback(self, *, agent: BaseAgent, callback_context: CallbackContext, result: Any = None) -> None:
         try:
@@ -128,18 +110,19 @@ class CountInvocationPlugin(BasePlugin):
             m["agent_count"] = self.agent_count
             app.state.metrics = m
         except Exception:
-            logging.exception("[CountInvocationPlugin] after_agent_callback error")
+            logging.exception("after_agent_callback error")
 
     async def before_model_callback(self, *, callback_context: CallbackContext, llm_request: LlmRequest) -> None:
         callback_context._llm_start = time.perf_counter()
         self.llm_request_count += 1
-        logging.info(f"[CountInvocationPlugin] LLM request #{self.llm_request_count}; prompt_len={len(getattr(llm_request, 'prompt', '') or '')}")
+        prompt_len = len(getattr(llm_request, "prompt", "") or "")
+        logging.info(f"[CountInvocationPlugin] LLM request #{self.llm_request_count}; prompt_len={prompt_len}")
         try:
             m = self._ensure_metrics_slot()
             m["llm_request_count"] = self.llm_request_count
             app.state.metrics = m
         except Exception:
-            logging.exception("[CountInvocationPlugin] failed to write llm_request_count to app.state.metrics")
+            logging.exception("failed to write llm_request_count to app.state.metrics")
 
     async def after_model_callback(self, *, callback_context: CallbackContext, llm_response: Any = None) -> None:
         try:
@@ -151,11 +134,13 @@ class CountInvocationPlugin(BasePlugin):
             m["llm_request_count"] = self.llm_request_count
             app.state.metrics = m
         except Exception:
-            logging.exception("[CountInvocationPlugin] after_model_callback error")
+            logging.exception("after_model_callback error")
 
-# ---------------- arXiv Helpers ---------------------
-
+# ---------------- arXiv helpers ----------------
 def _normalize_feed_entry(e) -> dict:
+    """
+    Normalize a feedparser entry into a consistent paper dict.
+    """
     arxiv_id = (e.get("id") or "").rsplit("/", 1)[-1] if e.get("id") else None
     authors = [a.get("name") for a in e.get("authors", []) if a.get("name")]
     pdf_url = None
@@ -182,7 +167,11 @@ def _normalize_feed_entry(e) -> dict:
         "raw_entry_id": e.get("id"),
     }
 
-async def arxiv_search(query: str, max_results: int = 10) -> List[dict]:
+async def arxiv_search(query: str, max_results: int = 5) -> List[dict]:
+    """
+    Query the arXiv API and return a list of normalized paper dicts.
+    Uses feedparser in a thread to avoid blocking the event loop.
+    """
     params = {
         "search_query": f"all:{query}",
         "start": 0,
@@ -194,180 +183,21 @@ async def arxiv_search(query: str, max_results: int = 10) -> List[dict]:
         async with session.get(ARXIV_API, params=params) as resp:
             resp.raise_for_status()
             xml_text = await resp.text()
-            # feedparser.parse is synchronous, run it in a thread
             feed = await asyncio.to_thread(feedparser.parse, xml_text)
             out = []
             for entry in getattr(feed, "entries", []):
                 try:
                     out.append(_normalize_feed_entry(entry))
                 except Exception:
-                    # swallow per-entry parse problems
+                    # Skip entries that fail to parse
                     continue
             return out
 
-# ---------------- Pinecone Helpers ---------------------
-
-def sanitize_metadata_for_pinecone(meta: Dict[str, Any]) -> Dict[str, Any]:
-    clean = {}
-    for k, v in (meta or {}).items():
-        if v is None:
-            continue
-        if isinstance(v, (str, int, float, bool)):
-            clean[k] = v
-            continue
-        if isinstance(v, list):
-            clean[k] = [str(x) for x in v if x is not None]
-            continue
-        if isinstance(v, (datetime, date)):
-            clean[k] = v.isoformat()
-            continue
-        try:
-            clean[k] = json.dumps(v, ensure_ascii=False)
-        except Exception:
-            clean[k] = str(v)
-    return clean
-
-def prepare_and_upsert(dense_index, records: List[dict], namespace: str = "default"):
-    """
-    Upserts records into Pinecone. Builds records like:
-      {"_id": "...", "<text_field>": "...", <meta fields> }
-
-    This version DOES NOT mirror into a local in-process index.
-    It tries to call common SDK methods in a defensive manner:
-      - upsert_records (text-based, integrated-embedding)
-      - upsert (vector-based)
-    """
-    if not records:
-        return {"ok": True, "note": "no records"}
-
-    # Determine the text field name expected by the index 
-    field_map = getattr(app.state, "field_map", {}) or {}
-    text_field = field_map.get("text", "text")
-
-    records_payload = []
-    for rec in records:
-        rid = rec.get("id") or rec.get("_id") or str(uuid.uuid4())
-        meta = sanitize_metadata_for_pinecone(rec.get("metadata", {}) or {})
-        text = (rec.get("text") or rec.get("chunk_text") or "")[:3000]
-
-        # Build the record with the correct text field name
-        r = {"_id": str(rid), text_field: str(text)}
-        # Merge metadata as top-level keys (avoid collisions)
-        for k, v in meta.items():
-            if k in ("_id", text_field):
-                r[f"meta_{k}"] = v
-            else:
-                r[k] = v
-        records_payload.append(r)
-
-    try:
-        if hasattr(dense_index, "upsert_records"):
-            return dense_index.upsert_records(namespace, records_payload) or {"ok": True, "count": len(records_payload)}
-        if hasattr(dense_index, "upsert"):
-            raise RuntimeError("Index supports 'upsert' (vector upsert) but no vectors provided. Use integrated-embedding index or supply vectors.")
-        if callable(getattr(dense_index, "upsert_records", None)):
-            return dense_index.upsert_records(namespace, records_payload) or {"ok": True, "count": len(records_payload)}
-        return {"ok": False, "error": "no_supported_upsert_method_on_index"}
-    except Exception as e:
-        logging.exception("Pinecone upsert failed")
-        return {"ok": False, "error": str(e)}
-
-def retrieve_from_pinecone(query: str, top_k: int = 5, namespace: str = "arxiv") -> List[dict]:
-    """
-    Query the Pinecone index using text or vector search and return list of:
-      { "id": <id>, "text": <picked_text>, "metadata": {...} }
-
-    This function is defensive across SDK versions:
-     - Prefers `search_records` / `search` / `query`-style methods that accept query text or vector
-     - Falls back to returning [] if index is not available
-    """
-    if not query:
-        return []
-
-    idx = getattr(app.state, "dense_index", None)
-    if idx is None:
-        return []
-
-    # Decide which method to call depending on the SDK
-    try:
-        # 1) If index exposes search_records (text/record search), use it
-        if hasattr(idx, "search_records"):
-            # Many Pinecone SDKs accept: search_records(query=..., top_k=..., namespace=...)
-            resp = idx.search_records(query=query, top_k=top_k, namespace=namespace)
-            hits = getattr(resp, "matches", None) or resp.get("matches", []) if isinstance(resp, dict) else resp
-            results = []
-            for h in hits[:top_k]:
-                # adapt to match object shapes
-                metadata = getattr(h, "metadata", None) or h.get("metadata", {}) if isinstance(h, dict) else {}
-                text = (
-                    getattr(h, "record", None) and getattr(h.record, "text", None)
-                ) or h.get("record", {}).get("text") if isinstance(h, dict) else None
-                # fallback to metadata title or other fields
-                if not text:
-                    text = metadata.get("title") or metadata.get("abstract") or ""
-                results.append({"id": getattr(h, "id", None) or h.get("id"), "text": text, "metadata": dict(metadata)})
-            return results
-
-        # 2) If index has query or search method accepting vectors/text, call query/search
-        if hasattr(idx, "query") or hasattr(idx, "search"):
-            # Some SDKs expose `query` which expects a vector OR a record id.
-            # Newer docs also provide `search_records` for text-based search; we've tried that above.
-            # As we don't have an embedding client here, try a text-based search call where supported.
-            if hasattr(idx, "search"):
-                resp = idx.search(query=query, top_k=top_k, namespace=namespace)
-            else:
-                resp = idx.query(query=query, top_k=top_k, namespace=namespace)
-            # resp shape varies: adapt by looking for 'matches' or 'results'
-            matches = getattr(resp, "matches", None) or resp.get("matches", []) if isinstance(resp, dict) else resp
-            out = []
-            for m in matches[:top_k]:
-                meta = getattr(m, "metadata", None) or m.get("metadata", {}) if isinstance(m, dict) else {}
-                text = meta.get("title") or meta.get("abstract") or (m.get("text") if isinstance(m, dict) else "")
-                out.append({"id": getattr(m, "id", None) or m.get("id"), "text": text, "metadata": dict(meta)})
-            return out
-
-        # 3) No supported search API found
-        return []
-    except Exception:
-        logging.exception("retrieve_from_pinecone failed")
-        return []
-# ------------------ Generic Helpers ------------------
-
-def merge_with_arxiv_candidates(result: dict, arxiv_candidates: List[dict]) -> dict:
-    """
-    Best-effort merge: if remote result papers lack urls, try to match by title to arxiv_candidates and attach pdf_url/link.
-    """
-    try:
-        if not isinstance(result, dict):
-            return result
-        if not arxiv_candidates:
-            return result
-        # build title->url map (lowercase normalized)
-        title_map = {}
-        for c in arxiv_candidates:
-            t = (c.get("title") or "").strip()
-            u = (c.get("pdf_url") or c.get("link") or "").strip()
-            if t:
-                title_map[t.lower()] = u
-        papers = result.get("papers") or []
-        merged = []
-        for p in papers:
-            if not isinstance(p, dict):
-                continue
-            t = (p.get("title") or "").strip()
-            u = (p.get("url") or p.get("link") or "").strip()
-            if not u and t and title_map.get(t.lower()):
-                u = title_map.get(t.lower())
-            merged.append({"title": t, "url": u})
-        result["papers"] = merged
-        return result
-    except Exception:
-        logging.exception("merge_with_arxiv_candidates failed")
-        return result
-    
+# ---------------- Generic helpers ----------------
 async def timed_async(fn, *args, metric_key: str = None, **kwargs):
     """
-    Run async function `fn` and record elapsed ms into app.state.metrics[metric_key].
+    Run an async function and measure elapsed time in milliseconds.
+    Optionally store the duration in app.state.metrics under metric_key.
     """
     start = time.perf_counter()
     res = await fn(*args, **kwargs)
@@ -378,20 +208,26 @@ async def timed_async(fn, *args, metric_key: str = None, **kwargs):
         if metric_key:
             app.state.metrics[metric_key] = elapsed_ms
     except Exception:
+        # Non-critical: metrics failure should not block response
         pass
     return res
 
-async def remote_summary_extract(query: str, remote_url: Optional[str] = None, timeout_sec: int = 25) -> dict:
+# ---------------- Remote summarizer integration ----------------
+async def remote_summary_extract(query: str = "", docs: Optional[List[dict]] = None,
+                                 remote_url: Optional[str] = None, timeout_sec: int = 25) -> dict:
     """
-    Calls the remote A2A summarizer and returns a validated dict:
-    - On success: {"summary": "...", "papers":[{"title":"...","url":"..."},...]}
-    - On failure: {"error": "...", "raw": "..."}
+    Call the remote summarizer service (A2A endpoint) and validate/normalize its response.
+
+    Returns:
+      - On success: {"summary": "<text>", "papers": [<paper dicts>] }
+      - On failure: {"error": "<code>", "raw": "<diagnostic info>"}
     """
-    url = "http://localhost:9001/a2a"
+    url = remote_url or "http://localhost:9001/a2a"
     payload = {
         "invocation_id": str(uuid.uuid4()),
         "sender": "ResearchCoordinator",
-        "query": query,
+        "query": query or "",
+        "docs": docs or []
     }
     start = time.perf_counter()
     try:
@@ -401,7 +237,7 @@ async def remote_summary_extract(query: str, remote_url: Optional[str] = None, t
                 resp.raise_for_status()
                 data = await resp.json()
     except Exception as e:
-        logging.exception("[remote_summary_extract] a2a call failed")
+        logging.exception("a2a call failed")
         try:
             app.state.metrics = getattr(app.state, "metrics", {})
             app.state.metrics["a2a_summarizer_ms"] = (time.perf_counter() - start) * 1000.0
@@ -410,6 +246,7 @@ async def remote_summary_extract(query: str, remote_url: Optional[str] = None, t
             pass
         return {"error": "remote_call_failed", "raw": str(e)}
 
+    # record timing and increment counter
     try:
         app.state.metrics = getattr(app.state, "metrics", {})
         app.state.metrics["a2a_summarizer_ms"] = (time.perf_counter() - start) * 1000.0
@@ -417,202 +254,209 @@ async def remote_summary_extract(query: str, remote_url: Optional[str] = None, t
     except Exception:
         pass
 
+    # Validate response shape
     if not isinstance(data, dict):
         return {"error": "remote_nonjson_response", "raw": str(data)[:4000]}
     if not data.get("ok"):
         return {"error": "remote_ok_false", "raw": data}
 
     result = data.get("result")
-    print("Raw result coming from payload", result)
 
+    # If result is string, try to parse JSON out of it
     if isinstance(result, str):
         try:
             result = json.loads(result)
         except Exception:
-
-            result = {"error": "remote_result_not_json", "raw": result[:4000]}
+            return {"error": "remote_result_not_json", "raw": result[:4000]}
 
     if not isinstance(result, dict):
         return {"error": "remote_result_bad_shape", "raw": str(result)[:4000]}
 
     if result.get("error"):
-        return {"error": result.get("error"), "raw": result.get("raw") or result.get("raw", "")}
-    if isinstance(result.get("summary"), str) and isinstance(result.get("papers"), list):
-        papers = []
-        for p in result.get("papers")[:5]:
+        return {"error": result.get("error"), "raw": result.get("raw") or ""}
+
+    # If remote returned a 'papers' list, normalize handling
+    papers = result.get("papers") or []
+    if isinstance(papers, list):
+        if papers and isinstance(papers[0], dict) and (
+            papers[0].get("id") or papers[0].get("abstract") or papers[0].get("pdf_url") or papers[0].get("arxiv_url")
+        ):
+            # Looks like canonical paper objects; preserve as-is
+            return {"summary": (result.get("summary") or "").strip(), "papers": papers}
+        # Legacy shape: list of {title,url}
+        normalized = []
+        for p in papers:
             if not isinstance(p, dict):
                 continue
             title = (p.get("title") or "").strip()
-            url = (p.get("url") or p.get("link") or "").strip()
-            if title and url:
-                papers.append({"title": title, "url": url})
-        return {"summary": result.get("summary").strip(), "papers": papers}
+            url = (p.get("url") or p.get("pdf_url") or p.get("link") or "").strip()
+            normalized.append({"title": title, "url": url})
+        return {"summary": (result.get("summary") or "").strip(), "papers": normalized}
+
+    # If the remote returned only a summary string, attach the original docs
+    summary_txt = (result.get("summary") or "").strip() if isinstance(result.get("summary"), str) else ""
+    if summary_txt:
+        return {"summary": summary_txt, "papers": docs or []}
+
     return {"error": "remote_result_missing_fields", "raw": result}
 
-async def summarizer(args: dict, tool_context=None):
+async def summarizer_tool(query: str = "", docs: Optional[List[dict]] = None,
+                          remote_url: Optional[str] = None, timeout_sec: int = 25):
     """
-    ADK will call this with a dict payload. Normalize it and call your existing remote_summary_extract.
-    Return both structured 'result' and 'content.parts[0].text' with a human-friendly summary + top-5 list.
+    Wrapper used as a FunctionTool for agents. It will:
+      - attempt to auto-fill docs from app.state if not provided
+      - call remote_summary_extract and return its structured result
     """
-    logging.info("[summarizer] invoked; args_len=%d", len(str(args or "")))
     try:
-        if not isinstance(args, dict):
-            q = args if isinstance(args, str) else ""
-            remote_url = None
-            timeout_sec = 25
-        else:
-            q = args.get("query") or args.get("request") or args.get("prompt") or ""
-            remote_url = args.get("remote_url") or None
-            timeout_sec = int(args.get("timeout_sec", 25))
+        logger.info("[summarizer_tool] called; query_len=%d docs_len=%s", len((query or "")), None if docs is None else len(docs))
+    except Exception:
+        pass
 
-        result = await remote_summary_extract(q, remote_url=remote_url, timeout_sec=timeout_sec)
+    # Auto-fill canonical docs from app.state if caller omitted docs
+    if not docs:
+        try:
+            last = getattr(app.state, "last_agent_output", None) or {}
+            cand = last.get("papers") or getattr(app.state, "arxiv_candidates", None) or []
+            if isinstance(cand, list) and cand:
+                docs = cand
+                logger.info("[summarizer_tool] auto-filled docs from app.state (len=%d)", len(docs))
+        except Exception:
+            logger.exception("failed to auto-fill docs; proceeding without docs")
 
-        if isinstance(result, dict) and result.get("summary"):
-            sb = (result.get("summary") or "").strip()
-            msg_lines = [f"Based on your query, here’s a quick summary:\n\n{sb}\n"]
-            papers = result.get("papers") or []
-            if papers:
-                msg_lines.append("\nTop matched papers:")
-                for i, p in enumerate(papers[:5], start=1):
-                    title = (p.get("title") or "").strip() or "<untitled>"
-                    url = (p.get("url") or p.get("pdf_url") or p.get("link") or "").strip()
-                    if url:
-                        msg_lines.append(f"{i}. {title} — {url}")
-                    else:
-                        msg_lines.append(f"{i}. {title}")
-            msg = "\n".join(msg_lines)
-        else:
-            
-            try:
-                msg = json.dumps(result, ensure_ascii=False)
-            except Exception:
-                msg = str(result)
+    res = await remote_summary_extract(query=query, docs=docs, remote_url=remote_url, timeout_sec=timeout_sec)
 
-        return {
-            "ok": True,
-            "result": result,
-            "content": {"parts": [{"text": msg}]}
-        }
+    # Log some basic signals about returned papers
+    try:
+        papers = res.get("papers") if isinstance(res, dict) else None
+        logger.info("[summarizer_tool] summarizer returned summary_len=%d papers_len=%s",
+                    len((res.get("summary") or "")), None if papers is None else len(papers))
+        if papers:
+            first = papers[0] if isinstance(papers, list) and papers else {}
+            has_link = bool(first.get("pdf_url") or first.get("arxiv_url") or first.get("link") or first.get("url"))
+            logger.info("[summarizer_tool] first_paper_has_link=%s", has_link)
+    except Exception:
+        pass
 
-    except Exception as e:
-        logging.exception("summarizer error")
-        err = {"error": "wrapper_exception", "raw": str(e)}
-        return {"ok": False, "result": err, "content": {"parts": [{"text": json.dumps(err, ensure_ascii=False)}]}}
+    return res
 
-# ---------------- Agent Declarations ---------------------
+# ---------------- Display / formatting ----------------
+def build_display_text(summary: Optional[str], papers: List[dict]) -> str:
+    """
+    Build a simple human-readable block the UI can render verbatim.
+    """
+    lines = []
+    if summary:
+        lines.append("Summary:")
+        lines.append(summary.strip())
+        lines.append("")
 
+    if papers:
+        for p in papers:
+            title = (p.get("title") or p.get("paper_title") or p.get("id") or "(no title)").strip()
+            url = (p.get("pdf_url") or p.get("link") or p.get("url") or p.get("arxiv_url") or "").strip()
+            if url:
+                lines.append(f"Title: {title}  Link: {url}")
+            else:
+                lines.append(f"Title: {title}")
+    else:
+        lines.append("No papers found.")
+
+    return "\n".join(lines)
+
+# ---------------- Agent definitions ----------------
 search_agent = LlmAgent(
     name="arxiv_search_agent",
     model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config, api_key=GOOGLE_API_KEY),
     instruction="""
-        Call the provided tool `arxiv_search` with the user's query and RETURN ONLY the tool/function RESPONSE OBJECT (no additional commentary or text).
-        The tool response will be consumed by the next agent.
+        Call the provided tool `arxiv_search` with the user's query and RETURN ONLY the tool/function RESPONSE OBJECT.
+        The structured tool response will be passed to the next agent.
     """,
-    tools=[arxiv_search, preload_tool],
+    tools=[FunctionTool(func=arxiv_search), preload_tool],
     description="Search arXiv and write structured results to state",
     output_key="arxiv_candidates",
 )
-
 
 final_agent = LlmAgent(
     name="final_summarizer_agent",
     model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config, api_key=GOOGLE_API_KEY),
     instruction="""
-        You are final_summarizer_agent.
-        Your job is to CALL the summarizer with a combined text (titles + abstracts) as 'query' to produce a structured JSON summary.
-        Example call: {"tool":"summarizer","query":"Title1 - Abstract1\\n\\nTitle2 - Abstract2 ..."}
-        WAIT for the remote summarizer's function_response (it will return structured JSON with keys 'summary', 'papers' and 'url').
-        Extract the summary and links from summary agent and show the response (summary and papers including URLs) in the UI in a human readable format.
+        1) Call the FunctionTool "summarizer" with:
+           - query: 1-3 line combined context built from titles + abstracts (or the user query).
+           - docs: canonical paper objects (id, title, abstract, pdf_url/arxiv_url when available).
+        2) After the tool returns, produce ONLY a plain-text message formatted like:
+
+Summary:
+<one to three sentence concise summary>
+
+Here are the papers with links:
+1. <Title 1> — <url1>
+2. <Title 2> — <url2>
+...
+        3) If the tool returns no summary, synthesize a short human summary from the first 3 docs or from the user query.
     """,
-    tools=[
-        FunctionTool(func=summarizer)
-    ],
+    tools=[FunctionTool(func=summarizer_tool)],
 )
 
 root_agent = SequentialAgent(
     name="ResearchCoordinator",
     sub_agents=[search_agent, final_agent],
-    description="Sequentially run search_agent then final_summarizer_agent"
+    description="Run search_agent followed by final_summarizer_agent",
 )
 
-# ---------------- Lifespan ---------------------
-
+# ---------------- Lifespan / startup ----------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create Pinecone client and index (defensive)
-    pc = Pinecone(api_key=PINECONE_API_KEY)
-    try:
-        if not pc.has_index(PINECONE_INDEX):
-            try:
-                pc.create_index_for_model(
-                    name=PINECONE_INDEX,
-                    cloud=PINECONE_CLOUD,
-                    region=os.getenv("PINECONE_ENVIRONMENT", "us-east-1"),
-                    embed={"model": PINECONE_MODEL, "field_map": {"text": "text"}},
-                )
-            except Exception:
-                pc.create_index(
-                    name=PINECONE_INDEX,
-                    dimension=APP_EMBED_DIM,
-                    metric="cosine"
-                )
-        # Describe index to derive any field_map
-        info = pc.describe_index(PINECONE_INDEX) or {}
-        field_map = {}
-        try:
-            if info.get("embed"):
-                field_map = info["embed"].get("field_map") or {}
-            if not field_map:
-                field_map = info.get("spec", {}).get("integration", {}).get("embedding", {}).get("field_map", {}) or {}
-        except Exception:
-            field_map = {}
-        if not field_map:
-            field_map = {"text": "text"}
-
-        # store runtime handles
-        app.state.pinecone_client = pc
-        app.state.dense_index = pc.Index(PINECONE_INDEX)
-        app.state.field_map = field_map
-
-        # minimal metrics slot
-        app.state.metrics = getattr(app.state, "metrics", {})
-
-        yield
-    finally:
-        pass
+    # Initialize simple metrics and field map used by the app
+    app.state.metrics = getattr(app.state, "metrics", {}) or {}
+    app.state.field_map = getattr(app.state, "field_map", {}) or {"text": "text"}
+    yield
 
 app.router.lifespan_context = lifespan
 
-# ---------------- Routes ---------------------
-
+# ---------------- HTTP routes ----------------
 @app.get("/")
 def root():
     return {"ok": True, "service": "ResearcherAssistant", "note": "POST /search"}
 
 @app.post("/search", response_model=SearchResponse)
 async def search_papers(req: SearchRequest):
+    """
+    Main search endpoint. High-level flow:
+      1. Validate request and initialize UI blob (app.state.last_agent_output).
+      2. Run arXiv search (synchronous to ensure canonical docs available).
+      3. Start the ADK Runner in the background to stream detailed agent events.
+      4. Immediately call the remote summarizer (server-side) with canonical docs to provide a fast
+         user-facing summary. This runs in parallel with the background runner.
+      5. Normalize returned papers, publish last_agent_output, and return SearchResponse using canonical docs.
+    """
     q = (req.query or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="empty query")
-    maxr = min(req.max_results or 10, 50)
+    maxr = min(req.max_results or 5, 10, 50)
 
-    # shape for UI
+    # Initialize UI-visible output blob
     app.state.last_agent_output = getattr(app.state, "last_agent_output", {}) or {}
     app.state.last_agent_output.update({
         "raw_text": "",
         "summary": None,
         "papers": [],
         "links": [],
-        "human_readable": None,
+        "display_text": None,
         "agent_final_text": "",
     })
 
     logging.info("HYBRID SEARCH q=%s maxr=%d", q, maxr)
 
     try:
+        # Attach metrics/tracking plugin instance for this request
         count_invocation_plugin = CountInvocationPlugin()
         app.state.count_invocation_plugin = count_invocation_plugin
 
+        # Fetch canonical arXiv candidates (used by summarizer and stored for UI)
+        arxiv_candidates = await timed_async(arxiv_search, q, max_results=min(maxr, 5), metric_key="arxiv_search_ms")
+        app.state.arxiv_candidates = arxiv_candidates or []
+
+        # Create a Runner for the root_agent. This will run in the background and publish event stream.
         runner = Runner(
             agent=root_agent,
             app_name="agents",
@@ -620,7 +464,12 @@ async def search_papers(req: SearchRequest):
             memory_service=memory_service,
             plugins=[LoggingPlugin(), app.state.count_invocation_plugin],
         )
+
         async def _run_and_persist_session(runner: Runner, session_obj, user_text: str):
+            """
+            Background task: run the agent runner asynchronously and update app.state.last_agent_output
+            with event snapshots and final text when available.
+            """
             final_response_text = None
             events_seen = []
             try:
@@ -631,41 +480,63 @@ async def search_papers(req: SearchRequest):
                     session_id=session_obj.id,
                     new_message=content,
                 ):
-                    # Collect a compact representation for debugging/inspection
+                    # Build compact event representation for logs and UI
                     try:
                         ev_repr = {
                             "id": getattr(event, "id", None),
                             "author": getattr(event, "author", None),
                             "type": getattr(event, "type", None),
                         }
-                        # try to capture text content if present (defensive)
                         if getattr(event, "content", None) and getattr(event.content, "parts", None):
                             ev_repr["text_snippet"] = (event.content.parts[0].text or "")[:500]
                         events_seen.append(ev_repr)
                         logger.info("runner event: %s", ev_repr)
                     except Exception:
                         logger.exception("error serializing event")
-                    
-                    try:
-                        # log last 10 full events for inspection (not just snippets)
-                        logger.info("DEBUG: last runner events (full) for session=%s", session_obj.id)
-                        # if runner yields event objects, write their reprs
-                        for ev in events_seen[-20:]:
-                            logger.info("DEBUG_EVENT: %s", ev)
-                        # additionally, inspect app.state.last_agent_output
-                        logger.info("DEBUG last_agent_output: %s", json.dumps(app.state.last_agent_output.get('agent_final_text') or "", ensure_ascii=False)[:4000])
-                    except Exception:
-                        logger.exception("failed to dump runner events")
 
-                    # detect final response events (ADK event shapes vary; be defensive)
+                    # Publish incremental snapshot to app.state.last_agent_output
+                    try:
+                        cur = getattr(app.state, "last_agent_output", {}) or {}
+                        cur.update({
+                            "agent_events": events_seen[-50:],
+                            "agent_session_id": getattr(session_obj, "id", None),
+                            "agent_last_event_time": datetime.utcnow().isoformat() + "Z",
+                        })
+                        app.state.last_agent_output = cur
+                    except Exception:
+                        logger.exception("failed to publish incremental last_agent_output")
+
+                    # Detect final-response signals and publish final text immediately
                     try:
                         if getattr(event, "is_final_response", None) and callable(event.is_final_response) and event.is_final_response():
                             if getattr(event, "content", None) and getattr(event.content, "parts", None):
                                 final_response_text = event.content.parts[0].text
+
+                            try:
+                                cur = getattr(app.state, "last_agent_output", {}) or {}
+                                cur.update({
+                                    "agent_final_text": final_response_text,
+                                    "agent_final_published_at": datetime.utcnow().isoformat() + "Z",
+                                    "agent_events": events_seen[-50:],
+                                })
+                                app.state.last_agent_output = cur
+                            except Exception:
+                                logger.exception("failed to publish agent_final_text (is_final_response)")
                             break
-                        # fallback heuristic: if event has .final == True or author == agent and content with text
+
                         if getattr(event, "final", False):
                             final_response_text = getattr(event.content.parts[0], "text", final_response_text) or final_response_text
+
+                            try:
+                                cur = getattr(app.state, "last_agent_output", {}) or {}
+                                cur.update({
+                                    "agent_final_text": final_response_text,
+                                    "agent_final_published_at": datetime.utcnow().isoformat() + "Z",
+                                    "agent_events": events_seen[-50:],
+                                })
+                                app.state.last_agent_output = cur
+                            except Exception:
+                                logger.exception("failed to publish agent_final_text (final)")
                             break
                     except Exception:
                         logger.exception("error checking final response")
@@ -673,68 +544,48 @@ async def search_papers(req: SearchRequest):
             except Exception:
                 logger.exception("_run_and_persist_session: runner error")
             finally:
-                # Persist session
-                try:
-                    if hasattr(memory_service, "add_session_to_memory"):
-                        await memory_service.add_session_to_memory(session_obj)
-                        logger.info("session persisted to memory: user_id=%s session_id=%s",
-                                    session_obj.user_id, session_obj.id)
-                    else:
-                        logger.warning("memory_service missing add_session_to_memory; skipping persist")
-                except Exception:
-                    logger.exception("persisting session to memory failed (non-fatal)")
-
-                # Attach events and final text to app.state.last_agent_output for UI/debug
+                # On completion, merge events and final text into the UI blob without overwriting summary/papers
                 try:
                     cur = getattr(app.state, "last_agent_output", {}) or {}
+                    fallback_text = cur.get("agent_final_text") or cur.get("summary") or cur.get("display_text") or cur.get("human_readable") or ""
                     cur.update({
-                        "agent_events": events_seen[-20:],  # keep last 20 events
-                        "agent_final_text": (final_response_text or cur.get("agent_final_text")),
+                        "agent_events": events_seen[-20:],
+                        "agent_final_text": (final_response_text or fallback_text),
                         "agent_session_id": getattr(session_obj, "id", None),
                     })
+
+                    # Ensure UI-facing fields are present and reasonably sized
+                    try:
+                        final_text_choice = cur.get("agent_final_text") or ""
+                        if final_text_choice and len(final_text_choice) > 8000:
+                            final_text_choice = final_text_choice[:8000] + "…"
+
+                        cur.setdefault("agent_final_text", final_text_choice)
+                        cur.setdefault("agent_session_id", cur.get("agent_session_id") or getattr(session_obj, "id", None))
+                        cur.setdefault("published_at", cur.get("agent_final_published_at") or datetime.utcnow().isoformat() + "Z")
+
+                        logger.info("DEBUG publish snapshot: agent_final_text_present=%s session_id=%s summary_len=%d",
+                                    bool(final_text_choice), cur.get("agent_session_id"), len((cur.get("summary") or "")))
+                    except Exception:
+                        logger.exception("failed to ensure agent_final_text/session_id on last_agent_output")
+
                     app.state.last_agent_output = cur
                     logger.info(
                         "attached runner events/final_text to last_agent_output (events=%d, final_present=%s)",
-                        len(events_seen), bool(final_response_text)
+                        len(events_seen), bool(final_response_text or fallback_text)
                     )
                 except Exception:
                     logger.exception("failed to attach runner events to last_agent_output")
 
-                # safely inspect agent_final_text (run in finally block, after app.state.last_agent_output set)
-                try:
-                    final_text = app.state.last_agent_output.get("agent_final_text")
-                    if final_text is None:
-                        final_text = ""
-
-                    # quick guard: skip parsing empty or obviously-non-json strings
-                    ft_strip = final_text.strip()
-                    if not ft_strip:
-                        logger.info("FINAL_AGENT_JSON_PARSE_SKIPPED: agent_final_text empty")
-                    elif not (ft_strip.startswith("{") or ft_strip.startswith("[")):
-                        # not starting with JSON punctuation — still log snippet but skip heavy parse
-                        snippet = (ft_strip[:200] + "...") if len(ft_strip) > 200 else ft_strip
-                        logger.info("FINAL_AGENT_JSON_PARSE_SKIPPED: text does not start with JSON. snippet=%s", snippet)
-                    else:
-                        try:
-                            parsed = json.loads(final_text)
-                            logger.info("FINAL_AGENT_JSON_OK: keys=%s", list(parsed.keys()) if isinstance(parsed, dict) else "<non-dict-root>")
-                        except Exception as decode_err:
-                            snippet = (ft_strip[:1000] + "...") if ft_strip else "<empty>"
-                            logger.warning("FINAL_AGENT_JSON_PARSE_FAILED: %s; snippet=%s", str(decode_err), snippet)
-                except Exception:
-                    logger.exception("Error while finalizing runner events (non-fatal)")
-
             return final_response_text
 
-        # create a session explicitly so add_session_to_memory has a session object to operate on
+        # Create a session and start the runner in background so UI can stream events while we summarise immediately
         session = await session_service.create_session(app_name=runner.app_name or "agents", user_id=str(uuid.uuid4()))
-        # schedule background run that will persist the session to memory when finished
         asyncio.create_task(_run_and_persist_session(runner, session, f"User query: {q}\n\nPlease follow the instructions carefully"))
     except Exception:
         logging.exception("Failed to start runner (non-fatal)")
 
-    arxiv_candidates = await timed_async(arxiv_search, q, max_results=min(maxr, 10), metric_key="arxiv_search_ms")
-
+    # Build combined text for summarizer from canonical arXiv candidates
     parts = []
     for i, c in enumerate((arxiv_candidates or [])[:8], start=1):
         title = (c.get("title") or "").strip()
@@ -748,56 +599,101 @@ async def search_papers(req: SearchRequest):
     combined = "Summarize these papers in 1-3 sentences and return JSON with keys 'summary' and 'papers' (title+url):\n\n"
     combined += ("\n".join(parts) if parts else q)
 
+    # Perform immediate (server-side) call to remote summarizer so UI receives a fast summary.
     start = time.perf_counter()
-    summarizer_result = await remote_summary_extract(combined, remote_url=None, timeout_sec=30)
+    summarizer_result = await remote_summary_extract(query=combined, docs=arxiv_candidates, remote_url=None, timeout_sec=30)
     app.state.metrics = getattr(app.state, "metrics", {}) or {}
     app.state.metrics["summarizer_ms"] = (time.perf_counter() - start) * 1000.0
 
-    try:
-        summarizer_result = merge_with_arxiv_candidates(summarizer_result, arxiv_candidates)
-    except Exception:
-        logging.exception("merge_with_arxiv_candidates failed (non-fatal)")
+    # --- Normalize returned papers into UI-friendly shapes ---
+    raw_papers = summarizer_result.get("papers") or []
+    normalized_papers = []
+    links_for_ui = []
 
+    def _pick_url(p):
+        return (p.get("pdf_url") or p.get("arxiv_url") or p.get("link") or p.get("url") or "").strip()
+
+    for p in raw_papers:
+        if not isinstance(p, dict):
+            continue
+        title = (p.get("title") or p.get("paper_title") or p.get("id") or "")[:1000]
+        url = _pick_url(p)
+        normalized = {
+            "id": p.get("id") or p.get("raw_entry_id") or str(uuid.uuid4()),
+            "title": title,
+            "abstract": p.get("abstract") or p.get("summary") or "",
+            "pdf_url": p.get("pdf_url"),
+            "arxiv_url": p.get("arxiv_url") or p.get("link") or None,
+            "link": url or None,
+            "raw": p,
+        }
+        normalized_papers.append(normalized)
+        if url:
+            links_for_ui.append({"title": title, "url": url})
+
+    # Fallback: if remote returned no papers, fall back to canonical arXiv candidates
+    if not normalized_papers and (arxiv_candidates or []):
+        for c in (arxiv_candidates or [])[:10]:
+            title = (c.get("title") or "")[:1000]
+            url = (c.get("pdf_url") or c.get("link") or "")
+            normalized_papers.append({
+                "id": c.get("id") or str(uuid.uuid4()),
+                "title": title,
+                "abstract": c.get("abstract") or "",
+                "pdf_url": c.get("pdf_url"),
+                "arxiv_url": c.get("link"),
+                "link": url or None,
+                "raw": c,
+            })
+            if url:
+                links_for_ui.append({"title": title, "url": url})
+
+    # Prepare raw_text for debugging/UI
     try:
         raw_text = json.dumps(summarizer_result, ensure_ascii=False)
     except Exception:
         raw_text = json.dumps({"error": "raw_text_serialization_failed", "repr": str(summarizer_result)[:2000]}, ensure_ascii=False)
 
-    human_readable = None
-    if summarizer_result.get("summary"):
-        human_readable = "Here is the summary:\n\n" + summarizer_result["summary"] + "\n\n"
-        if summarizer_result.get("papers"):
-            human_readable += "Top papers:\n"
-            for i, p in enumerate(summarizer_result["papers"][:5], start=1):
-                human_readable += f"{i}. {p.get('title')} — {p.get('url')}\n"
-
-    last_output = {
-        "raw_text": raw_text,
-        "summary": summarizer_result.get("summary"),
-        "papers": summarizer_result.get("papers") or [],
-        "links": summarizer_result.get("papers") or [],
-        "human_readable": human_readable,
-        "source": "hybrid-orchestrator",
-    }
-    app.state.last_agent_output = last_output
-    logging.info("Published last_agent_output (summary_present=%s, papers=%d)",
-                 bool(last_output.get("summary")), len(last_output.get("papers") or []))
-
-    # upsert to Pinecone 
+    # Build human-readable block for UI rendering
     try:
-        upsert_recs = []
-        for e in (arxiv_candidates or [])[:maxr]:
-            upsert_recs.append({
-                "id": f"arxiv::{e.get('id') or str(uuid.uuid4())}",
-                "metadata": {"title": e.get("title"), "abstract": e.get("abstract"), "pdf_url": e.get("pdf_url")},
-                "text": (e.get("title","") + "\n\n" + (e.get("abstract") or ""))[:3000],
-            })
-        if hasattr(app.state, "dense_index"):
-            await asyncio.to_thread(prepare_and_upsert, app.state.dense_index, upsert_recs, "arxiv")
+        human_readable = build_display_text(
+            summary=summarizer_result.get("summary"),
+            papers=normalized_papers or (raw_papers or [])
+        )
     except Exception:
-        logging.exception("Pinecone upsert failed (non-fatal)")
+        human_readable = None
+        try:
+            if summarizer_result.get("summary"):
+                human_readable = "Summary:\n\n" + summarizer_result.get("summary") + "\n\n"
+                if normalized_papers:
+                    human_readable += "Top papers:\n"
+                    for i, p in enumerate(normalized_papers[:5], start=1):
+                        display_url = p.get("link") or p.get("pdf_url") or p.get("arxiv_url") or ""
+                        human_readable += f"{i}. {p.get('title','(no title)')} — {display_url}\n"
+        except Exception:
+            human_readable = None
 
-    # build and return SearchResponse as before
+    # Merge and publish last_agent_output (do not overwrite existing summary/papers if set)
+    try:
+        cur = getattr(app.state, "last_agent_output", {}) or {}
+        cur.update({
+            "raw_text": raw_text,
+            "summary": summarizer_result.get("summary"),
+            "papers": raw_papers,
+            "normalized_papers": normalized_papers,
+            "links": links_for_ui,
+            "display_text": human_readable,
+            "human_readable": human_readable,
+            "source": "hybrid-orchestrator",
+        })
+        app.state.last_agent_output = cur
+
+        logging.info("Published last_agent_output (summary_present=%s, papers=%d, normalized_papers=%d, links=%d)",
+                     bool(cur.get("summary")), len(raw_papers), len(normalized_papers), len(links_for_ui))
+    except Exception:
+        logger.exception("Failed to publish last_agent_output (non-fatal)")
+
+    # Build response using canonical arXiv candidates (these are the authoritative paper objects returned on /search)
     papers_items = []
     for e in (arxiv_candidates or [])[:maxr]:
         papers_items.append(PaperItem(
@@ -813,13 +709,19 @@ async def search_papers(req: SearchRequest):
         query=q,
         count=len(papers_items),
         papers=papers_items,
-        summary=last_output.get("summary"),
+        summary=app.state.last_agent_output.get("summary"),
         top_papers=[p.dict() for p in papers_items[:5]],
-        top_paper_links=[{"title": p.title, "url": p.pdf_url or p.arxiv_url or ""} for p in papers_items[:5]]
+        top_paper_links=[{"title": p.title, "url": p.pdf_url or p.arxiv_url or ""} for p in papers_items[:5]],
+        display_text=app.state.last_agent_output.get("display_text"),
+        human_readable=app.state.last_agent_output.get("human_readable"),
     )
 
+# ---------------- Admin / observability endpoints ----------------
 @app.get("/admin/metrics")
 def get_metrics():
+    """
+    Return a small metrics snapshot for basic observability.
+    """
     try:
         metrics = getattr(app.state, "metrics", {}) or {}
         resp = {
@@ -832,21 +734,22 @@ def get_metrics():
     except Exception as e:
         logging.exception("Error reading metrics")
         return {"ok": False, "error": str(e)}
-    
+
 @app.get("/admin/last_agent_output")
 def last_agent_output():
     """
-    Return a small, UI-friendly blob:
-      - summary (if available)
-      - papers (if available) : expected list of {title, link, ...}
-      - links (if available)
-      - raw_text : agent raw string
-    Frontend should render summary/papers if present, otherwise fall back to raw_text.
+    Return a compact UI-friendly blob:
+      - summary, display_text/human_readable
+      - papers (raw list returned by summarizer)
+      - links (simple {title,url} list)
+      - raw_text (raw string from summarizer) and raw_blob for debugging
     """
     out = getattr(app.state, "last_agent_output", None) or {}
     return {
         "ok": True,
         "summary": out.get("summary"),
+        "display_text": out.get("display_text"),
+        "human_readable": out.get("human_readable"),
         "papers": out.get("papers"),
         "links": out.get("links"),
         "raw_text": out.get("raw_text"),
@@ -856,8 +759,8 @@ def last_agent_output():
 @app.get("/debug/watch_last_output")
 def debug_watch_last_output(duration_sec: int = 10, poll_interval: float = 0.5):
     """
-    Poll app.state for changes to last_agent_output and metrics for `duration_sec`.
-    Returns timeline of observed values.
+    Poll the application state for changes to last_agent_output and return a timeline.
+    Useful for debugging and UI polling during demonstrations.
     """
     start = time.time()
     timeline = []
@@ -867,8 +770,6 @@ def debug_watch_last_output(duration_sec: int = 10, poll_interval: float = 0.5):
             s = getattr(app, "state", None)
             cur = getattr(s, "last_agent_output", None)
             metrics = getattr(s, "metrics", None)
-            # string summary (short)
-            summary = None
             if cur is None:
                 summary = None
             else:
@@ -887,25 +788,6 @@ def debug_watch_last_output(duration_sec: int = 10, poll_interval: float = 0.5):
         time.sleep(poll_interval)
     return {"ok": True, "timeline": timeline}
 
-
-@app.post("/admin/clear_namespace")
-async def clear_namespace(namespace: str = Body("arxiv", embed=True)):
-    """
-    DEV-ONLY: Delete all vectors in the given namespace (keeps the index).
-    Pass JSON body: {"namespace": "arxiv"}.
-    """
-    try:
-        idx = app.state.dense_index  # created in lifespan()
-        # Attempt the typical SDK call that deletes all vectors in a namespace
-        try:
-           
-            idx.delete(delete_all=True, namespace=namespace)
-        except TypeError:
-            
-            idx.delete(delete_all=True)
-        return {"ok": True, "note": f"cleared namespace {namespace}"}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
+# ---------------- Entrypoint ----------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,18 +1,19 @@
 import os
 import uuid
+import json
+import asyncio
 import logging
-from models.model import A2APayload
+from typing import Any, Optional
+
 from fastapi import FastAPI, HTTPException
+from dotenv import load_dotenv
+
+from models.model import A2APayload
 from google.adk.agents import LlmAgent
-from google.adk.models.google_llm import Gemini
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.adk.plugins.logging_plugin import LoggingPlugin
-from dotenv import load_dotenv
-import asyncio
-import json
-import re
-import urllib.parse
+from google.adk.models.google_llm import Gemini
 
 load_dotenv()
 
@@ -23,207 +24,163 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 app = FastAPI(title="remote-summarizer", version="0.1")
 
-# Local in-memory session service
+# Session service used by the remote LLM agent
 session_service = InMemorySessionService()
 
-# Define the remote summarizer agent
+
+# ---------------------------------------------------------------------------
+# Remote Summarizer Agent
+# ---------------------------------------------------------------------------
+# This agent receives document metadata (titles + abstracts) and produces
+# a short 1–3 sentence summary. It must return either:
+#   - A JSON object with a "summary" field, OR
+#   - Plain text containing only the summary.
+# No conversational filler or metadata is allowed.
+# ---------------------------------------------------------------------------
+
 remote_summarizer_agent = LlmAgent(
     name="remote_summarizer_agent",
-    model=Gemini(model=os.getenv("REMOTE_SUMMARIZER_MODEL", "gemini-2.5-flash-lite"), api_key=GOOGLE_API_KEY),
+    model=Gemini(
+        model=os.getenv("REMOTE_SUMMARIZER_MODEL", "gemini-2.5-flash-lite"),
+        api_key=GOOGLE_API_KEY
+    ),
     instruction=(
-        "You are a remote summarizer. GIVEN an input (titles+abstracts or docs), OUTPUT ONLY a single valid JSON object "
-        "and nothing else. The JSON MUST have these keys:\n\n"
-        "  {\"summary\": \"<1-3 sentence concise summary>\",\n"
-        "   \"papers\": [ {\"title\":\"...\",\"url\":\"https://...\"}, ... up to 5 items ] }\n\n"
-        "If you cannot create a proper summary or cannot find 5 papers, still RETURN JSON. Example valid output exactly:\n"
-        "{\"summary\":\"Two-sentence summary.\", \"papers\":[{\"title\":\"T1\",\"url\":\"https://...\"}, {\"title\":\"T2\",\"url\":\"https://...\"}]}\n\n"
-        "Do NOT include extra commentary, explanation, or formatting. If you fail, return: {\"error\":\"explain reason\"}."
+        "Summarize the given documents or text. Output ONLY either:\n"
+        "  1) A JSON object with a 'summary' field (and optionally 'papers'), OR\n"
+        "  2) Plain text with a concise 1–3 sentence summary.\n"
+        "Do not include explanations or conversation—only the summary."
     ),
 )
 
-# URL regex helper
-URL_RE = re.compile(r"https?://[^\s'\"\)\]\}<>]+", re.IGNORECASE)
 
-def extract_json_from_text(s: str):
+# ---------------------------------------------------------------------------
+# Utility: Try to extract JSON from a raw text LLM output
+# ---------------------------------------------------------------------------
+def extract_json_from_text(s: str) -> Optional[Any]:
     if not s:
         return None
+
+    # Try direct JSON parsing first
     try:
         return json.loads(s)
     except Exception:
-        cand = re.findall(r'(\{(?:.|\n)*\}|\[(?:.|\n)*\])', s)
-        if not cand:
-            return None
-        cand.sort(key=len, reverse=True)
-        for c in cand:
-            try:
-                return json.loads(c)
-            except Exception:
-                continue
+        pass
+
+    # Fallback: extract the largest JSON-looking substring from the text
+    import re
+    candidates = re.findall(r'(\{(?:.|\n)*\}|\[(?:.|\n)*\])', s)
+    if not candidates:
         return None
 
-def find_urls_in_text(s: str):
-    if not s:
-        return []
-    return list(dict.fromkeys(URL_RE.findall(s)))
+    candidates.sort(key=len, reverse=True)
 
-def ensure_papers_have_urls(parsed_obj, raw_text):
-    """
-    Ensure parsed_obj['papers'] is a list of dicts with 'title' and 'url'.
-    Try to rescue missing URLs from raw_text (markdown links, bare urls).
-    """
-    if not isinstance(parsed_obj, dict):
-        return parsed_obj
-    papers = parsed_obj.get("papers") or []
-    if not papers:
-        return parsed_obj
-    fallback_urls = find_urls_in_text(raw_text)
-    cleaned = []
-    for i, p in enumerate(papers):
-        if not isinstance(p, dict):
+    for c in candidates:
+        try:
+            return json.loads(c)
+        except Exception:
             continue
-        title = (p.get("title") or "").strip()
-        url = (p.get("url") or p.get("link") or p.get("pdf_url") or "").strip()
-        # extract http inside if present
-        if url and not url.lower().startswith("http"):
-            found = URL_RE.findall(url)
-            url = found[0] if found else ""
-        # try find url near title occurrence
-        if not url and title and title in raw_text:
-            idx = raw_text.find(title)
-            if idx >= 0:
-                window = raw_text[idx: idx + 400]
-                found = URL_RE.findall(window)
-                if found:
-                    url = found[0]
-        # fallback to nth url from raw_text
-        if not url and i < len(fallback_urls):
-            url = fallback_urls[i]
-        # final normalize
-        if url:
-            url = url.strip().rstrip(').,')
-            try:
-                parsed = urllib.parse.urlparse(url)
-                if not parsed.scheme:
-                    url = ""
-            except Exception:
-                url = ""
-        if title or url:
-            cleaned.append({"title": title, "url": url})
-    parsed_obj["papers"] = cleaned
-    return parsed_obj
 
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Utility: Extract human-readable text from ADK event objects
+# ---------------------------------------------------------------------------
 def extract_text_from_events(events) -> str:
+    """
+    Returns the most useful text fragment from the ADK event stream.
+    Priority:
+        1. content.parts[*].text
+        2. content.parts[*].function_response.response (string or dict)
+        3. event.text
+        4. string representation of the event
+    """
     if events is None:
         return ""
-    def try_parse_json_from_str(s: str):
-        if not s or len(s) < 20:
-            return None
-        try:
-            return json.loads(s)
-        except Exception:
-            pass
-        cand = re.findall(r'(\{(?:.|\n)*\}|\[(?:.|\n)*\])', s)
-        if not cand:
-            return None
-        cand.sort(key=len, reverse=True)
-        for c in cand:
-            try:
-                return json.loads(c)
-            except Exception:
-                continue
-        return None
 
-    ev_list = events if isinstance(events, list) else [events]
-    last_str_fallback = ""
-    for ev in reversed(ev_list):
+    event_list = events if isinstance(events, list) else [events]
+
+    for ev in reversed(event_list):
         try:
-            c = getattr(ev, "content", None)
-            if c:
-                parts = getattr(c, "parts", None) or []
+            content = getattr(ev, "content", None)
+            if content:
+                parts = getattr(content, "parts", []) or []
+
+                # Extract plain text from parts
                 for p in parts:
-                    t = getattr(p, "text", None)
-                    if t and isinstance(t, str) and t.strip():
-                        return t.strip()
+                    if isinstance(getattr(p, "text", None), str) and p.text.strip():
+                        return p.text.strip()
+
+                # Extract function response payloads
                 for p in parts:
                     fr = getattr(p, "function_response", None)
                     if fr:
                         resp = getattr(fr, "response", None)
+                        if isinstance(resp, str) and resp.strip():
+                            return resp.strip()
                         if isinstance(resp, dict):
-                            for k in ("summary", "result_text", "result", "text", "body"):
-                                if k in resp and isinstance(resp[k], str) and resp[k].strip():
-                                    return resp[k].strip()
-                            for v in resp.values():
-                                if isinstance(v, str) and v.strip():
-                                    return v.strip()
-                        else:
-                            s = str(resp)
-                            if s and len(s) > 10:
-                                parsed = try_parse_json_from_str(s)
-                                if isinstance(parsed, dict) and parsed.get("summary"):
-                                    return parsed.get("summary").strip()
-                                return s.strip()
-                for p in parts:
-                    fc = getattr(p, "function_call", None)
-                    if fc:
-                        s = str(fc)
-                        parsed = try_parse_json_from_str(s)
-                        if isinstance(parsed, dict):
-                            if parsed.get("summary"):
-                                return parsed.get("summary").strip()
-                            if parsed.get("papers") and parsed.get("summary"):
-                                return parsed.get("summary").strip()
-                        if s and len(s) > 10:
-                            last_str_fallback = s
-            if getattr(ev, "text", None):
-                t = getattr(ev, "text")
-                if t and isinstance(t, str) and t.strip():
-                    return t.strip()
+                            if isinstance(resp.get("summary"), str):
+                                return resp.get("summary").strip()
+                            return json.dumps(resp, ensure_ascii=False)
+
+            # If event has a direct text field
+            if isinstance(getattr(ev, "text", None), str) and ev.text.strip():
+                return ev.text.strip()
+
+            # Fallback: string representation
             s = str(ev)
             if s and len(s) > 10:
-                last_str_fallback = s
+                return s.strip()
+
         except Exception:
             continue
 
-    if last_str_fallback:
-        parsed = try_parse_json_from_str(last_str_fallback)
-        if isinstance(parsed, dict) and parsed.get("summary"):
-            return parsed.get("summary").strip()
-        if "MALFORMED_FUNCTION_CALL" in last_str_fallback or "function_call" in last_str_fallback:
-            try:
-                sfull = str(events)
-                full_parsed = try_parse_json_from_str(sfull)
-                if isinstance(full_parsed, dict) and full_parsed.get("summary"):
-                    return full_parsed.get("summary").strip()
-            except Exception:
-                pass
-            return "remote_agent_malformed_function_call: summarizer attempted a tool-call but returned malformed function metadata."
-        return last_str_fallback[:4000]
     return ""
+
+
+# ---------------------------------------------------------------------------
+# A2A Endpoint
+# ---------------------------------------------------------------------------
+# Receives: { query: str, docs: [...] }
+# Returns:  { ok: True, invocation_id, result: { summary, papers } }
+# ---------------------------------------------------------------------------
 
 @app.post("/a2a")
 async def a2a_call(payload: A2APayload):
-    if not payload or not payload.query:
-        raise HTTPException(status_code=400, detail="query required")
+    if not payload or not (payload.query or payload.docs):
+        raise HTTPException(status_code=400, detail="query or docs required")
 
     invocation_id = payload.invocation_id or str(uuid.uuid4())
 
-    # Debug: log incoming payload
-    logger.info("[a2a] incoming payload invocation_id=%s sender=%s query_len=%d docs_len=%d",
-                invocation_id, payload.sender, len((payload.query or "")), len(payload.docs or []))
+    logger.info(
+        "[a2a] invocation_id=%s sender=%s query_len=%d docs_len=%d",
+        invocation_id,
+        payload.sender,
+        len(payload.query or ""),
+        len(payload.docs or []),
+    )
 
+    # -------------------------------------------------------------------
+    # Build summarization prompt:
+    # If docs exist → use titles + abstracts
+    # If not → fall back to raw query text.
+    # -------------------------------------------------------------------
     if payload.docs:
         parts = []
-        for i, d in enumerate(payload.docs, 1):
-            t = (d.get("title") or "")[:300]
-            a = (d.get("abstract") or d.get("summary") or "")[:1200]
-            parts.append(f"{i}. {t}\n{a}\n")
+        for i, d in enumerate(payload.docs, start=1):
+            title = (d.get("title") or "")[:300]
+            abstract = (d.get("abstract") or d.get("summary") or "")[:1200]
+            parts.append(f"{i}. {title}\n{abstract}\n")
+
         prompt = (
-            f"Summarize these {len(parts)} documents in 1-3 concise sentences and return JSON with keys 'summary' and 'papers' (list of title/url):\n\n"
+            f"Summarize these {len(parts)} documents in 1–3 sentences. "
+            f"Return ONLY a JSON summary or plain text summary:\n\n"
             + "\n".join(parts)
         )
     else:
         prompt = payload.query
 
+    # Runner for the remote summarizer agent
     runner = Runner(
         agent=remote_summarizer_agent,
         app_name="agents",
@@ -231,62 +188,49 @@ async def a2a_call(payload: A2APayload):
         plugins=[LoggingPlugin()],
     )
 
-    res = runner.run_debug(prompt)
-    if asyncio.iscoroutine(res):
-        events = await res
-    else:
-        events = res
+    # -------------------------------------------------------------------
+    # Execute summarizer agent and extract usable text
+    # -------------------------------------------------------------------
+    events = None
+    result_text = ""
 
-    # Debug: log raw events (first chunk)
     try:
-        raw_events_str = str(events)[:4000]
-        logger.info("[a2a-debug] raw_events_preview=%s", raw_events_str)
-    except Exception:
-        logger.exception("[a2a-debug] failed to stringify events")
+        result = runner.run_debug(prompt)
+        events = await result if asyncio.iscoroutine(result) else result
+        result_text = extract_text_from_events(events) or ""
+        logger.info("[a2a] extracted result_text length=%d", len(result_text))
 
-    result_text = extract_text_from_events(events) or ""
-    logger.info("[a2a-debug] extracted_text_len=%d", len(result_text))
-    logger.info("[a2a-debug] extracted_text_sample=%s", (result_text or "")[:2000])
+    except Exception as e:
+        # Fail gracefully — return an empty summary but preserve docs
+        logger.exception(
+            "[a2a] runner failed — returning empty summary (invocation_id=%s). Error: %s",
+            invocation_id, str(e)
+        )
+        result_text = ""
 
+    # -------------------------------------------------------------------
+    # Parse result: JSON → summary, or fallback to plain text
+    # -------------------------------------------------------------------
     parsed = extract_json_from_text(result_text)
-    if not parsed:
-        parsed = extract_json_from_text(str(events))
+    summary = ""
 
-    # If we found JSON, try to rescue URLs from the raw text
-    if isinstance(parsed, dict):
-        parsed = ensure_papers_have_urls(parsed, result_text)
+    if isinstance(parsed, dict) and isinstance(parsed.get("summary"), str):
+        summary = parsed.get("summary").strip()
+    elif result_text.strip():
+        summary = result_text.strip()
 
-    # Validate shape: must be dict and have either 'summary'+ 'papers' or an 'error'
-    valid = False
-    if isinstance(parsed, dict):
-        if parsed.get("error") and isinstance(parsed.get("error"), str):
-            valid = True
-        elif isinstance(parsed.get("summary"), str) and isinstance(parsed.get("papers"), list):
-            # enforce up to 5 papers and each has title+url (url may be empty string if we couldn't find one)
-            papers = parsed.get("papers")[:5]
-            cleaned = []
-            for p in papers:
-                if not isinstance(p, dict):
-                    continue
-                title = (p.get("title") or "").strip()
-                url = (p.get("url") or p.get("link") or "").strip()
-                if url and not url.lower().startswith("http"):
-                    found = URL_RE.findall(url)
-                    url = found[0] if found else ""
-                cleaned.append({"title": title, "url": url})
-            parsed["papers"] = cleaned
-            valid = True
+    # Always return the original document list
+    papers = payload.docs or []
 
-    if not valid:
-        # return an error shape to calling service so they always receive JSON, include raw_text for debugging
-        parsed = {"error": "remote_summarizer_malformed_output", "raw": result_text[:4000]}
+    logger.info(
+        "[a2a] invocation_id=%s returning summary_len=%d papers_count=%d",
+        invocation_id,
+        len(summary or ""),
+        len(papers)
+    )
 
-    # Debug: log final parsed result we will return
-    try:
-        logger.info("[a2a] invocation_id=%s sender=%s returning_keys=%s parsed_preview=%s",
-                    invocation_id, payload.sender, list(parsed.keys()) if isinstance(parsed, dict) else None,
-                    (json.dumps(parsed, ensure_ascii=False)[:1000] if isinstance(parsed, (dict, list)) else str(parsed)[:1000]))
-    except Exception:
-        logger.exception("[a2a] failed to log parsed output")
-
-    return {"ok": True, "invocation_id": invocation_id, "result": parsed}
+    return {
+        "ok": True,
+        "invocation_id": invocation_id,
+        "result": {"summary": summary, "papers": papers},
+    }

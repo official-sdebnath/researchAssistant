@@ -22,7 +22,9 @@ class SearchResponse(BaseModel):
     papers: List[PaperItem]
     summary: Optional[str] = None
     top_papers: Optional[List[PaperItem]] = None
-    top_paper_links: Optional[List[Dict[str, str]]] = None 
+    top_paper_links: Optional[List[Dict[str, str]]] = None
+    display_text: Optional[str] = None
+    human_readable: Optional[str] = None  
 
 class A2APayload(BaseModel):
     invocation_id: Optional[str] = None
