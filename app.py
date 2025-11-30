@@ -93,7 +93,8 @@ retry_config = types.HttpRetryOptions(
 
 class CountInvocationPlugin(BasePlugin):
     """
-    Counts agent runs and LLM requests, records timings, and writes simple metrics to app.state.metrics.
+    Counts agent runs and LLM requests, records timings,
+    and writes simple metrics to app.state.metrics (app-scoped).
     """
     def __init__(self) -> None:
         super().__init__(name="count_invocation")
@@ -102,22 +103,30 @@ class CountInvocationPlugin(BasePlugin):
         self.last_agent_run_ms = None
         self.last_llm_request_ms = None
 
+    def _ensure_metrics_slot(self):
+        app.state.metrics = getattr(app.state, "metrics", {}) or {}
+        return app.state.metrics
+
     async def before_agent_callback(self, *, agent: BaseAgent, callback_context: CallbackContext) -> None:
         callback_context._agent_start = time.perf_counter()
         self.agent_count += 1
         logging.info(f"[CountInvocationPlugin] Agent run #{self.agent_count} for agent={getattr(agent, 'name', None)}")
+        try:
+            m = self._ensure_metrics_slot()
+            m["agent_count"] = self.agent_count
+            app.state.metrics = m
+        except Exception:
+            logging.exception("[CountInvocationPlugin] failed to write agent_count to app.state.metrics")
 
     async def after_agent_callback(self, *, agent: BaseAgent, callback_context: CallbackContext, result: Any = None) -> None:
         try:
             elapsed = max(0.0, (time.perf_counter() - getattr(callback_context, "_agent_start", time.perf_counter())) * 1000.0)
             self.last_agent_run_ms = elapsed
             logging.info(f"[CountInvocationPlugin] Agent {getattr(agent, 'name', None)} finished in {elapsed:.1f} ms")
-            try:
-                app.state.metrics = getattr(app.state, "metrics", {})
-                app.state.metrics["last_agent_run_ms"] = elapsed
-                app.state.metrics["agent_count"] = self.agent_count
-            except Exception:
-                pass
+            m = self._ensure_metrics_slot()
+            m["last_agent_run_ms"] = elapsed
+            m["agent_count"] = self.agent_count
+            app.state.metrics = m
         except Exception:
             logging.exception("[CountInvocationPlugin] after_agent_callback error")
 
@@ -125,18 +134,22 @@ class CountInvocationPlugin(BasePlugin):
         callback_context._llm_start = time.perf_counter()
         self.llm_request_count += 1
         logging.info(f"[CountInvocationPlugin] LLM request #{self.llm_request_count}; prompt_len={len(getattr(llm_request, 'prompt', '') or '')}")
+        try:
+            m = self._ensure_metrics_slot()
+            m["llm_request_count"] = self.llm_request_count
+            app.state.metrics = m
+        except Exception:
+            logging.exception("[CountInvocationPlugin] failed to write llm_request_count to app.state.metrics")
 
     async def after_model_callback(self, *, callback_context: CallbackContext, llm_response: Any = None) -> None:
         try:
             elapsed = max(0.0, (time.perf_counter() - getattr(callback_context, "_llm_start", time.perf_counter())) * 1000.0)
             self.last_llm_request_ms = elapsed
             logging.info(f"[CountInvocationPlugin] LLM response received in {elapsed:.1f} ms")
-            try:
-                app.state.metrics = getattr(app.state, "metrics", {})
-                app.state.metrics["last_llm_request_ms"] = elapsed
-                app.state.metrics["llm_request_count"] = self.llm_request_count
-            except Exception:
-                pass
+            m = self._ensure_metrics_slot()
+            m["last_llm_request_ms"] = elapsed
+            m["llm_request_count"] = self.llm_request_count
+            app.state.metrics = m
         except Exception:
             logging.exception("[CountInvocationPlugin] after_model_callback error")
 
@@ -248,16 +261,10 @@ def prepare_and_upsert(dense_index, records: List[dict], namespace: str = "defau
         records_payload.append(r)
 
     try:
-        # Try to call the high-level "upsert_records" (text-based upsert) if present.
         if hasattr(dense_index, "upsert_records"):
             return dense_index.upsert_records(namespace, records_payload) or {"ok": True, "count": len(records_payload)}
-        # Fallback to vector upsert if that method is available (older/newer SDKs)
         if hasattr(dense_index, "upsert"):
-            # The vector upsert expects (id, vector, metadata). We don't have a vector here,
-            # so prefer upsert_records. If you're using integrated-embedding indexes, upsert_records is preferred.
-            # If dense_index.upsert is used, the calling code must supply vectors; here we raise an informative error.
             raise RuntimeError("Index supports 'upsert' (vector upsert) but no vectors provided. Use integrated-embedding index or supply vectors.")
-        # Finally, try generic upsert_records signature if index object itself offers one
         if callable(getattr(dense_index, "upsert_records", None)):
             return dense_index.upsert_records(namespace, records_payload) or {"ok": True, "count": len(records_payload)}
         return {"ok": False, "error": "no_supported_upsert_method_on_index"}
@@ -325,6 +332,38 @@ def retrieve_from_pinecone(query: str, top_k: int = 5, namespace: str = "arxiv")
         logging.exception("retrieve_from_pinecone failed")
         return []
 # ------------------ Generic Helpers ------------------
+
+def merge_with_arxiv_candidates(result: dict, arxiv_candidates: List[dict]) -> dict:
+    """
+    Best-effort merge: if remote result papers lack urls, try to match by title to arxiv_candidates and attach pdf_url/link.
+    """
+    try:
+        if not isinstance(result, dict):
+            return result
+        if not arxiv_candidates:
+            return result
+        # build title->url map (lowercase normalized)
+        title_map = {}
+        for c in arxiv_candidates:
+            t = (c.get("title") or "").strip()
+            u = (c.get("pdf_url") or c.get("link") or "").strip()
+            if t:
+                title_map[t.lower()] = u
+        papers = result.get("papers") or []
+        merged = []
+        for p in papers:
+            if not isinstance(p, dict):
+                continue
+            t = (p.get("title") or "").strip()
+            u = (p.get("url") or p.get("link") or "").strip()
+            if not u and t and title_map.get(t.lower()):
+                u = title_map.get(t.lower())
+            merged.append({"title": t, "url": u})
+        result["papers"] = merged
+        return result
+    except Exception:
+        logging.exception("merge_with_arxiv_candidates failed")
+        return result
     
 async def timed_async(fn, *args, metric_key: str = None, **kwargs):
     """
@@ -467,10 +506,9 @@ search_agent = LlmAgent(
     model=Gemini(model="gemini-2.5-flash-lite", retry_options=retry_config, api_key=GOOGLE_API_KEY),
     instruction="""
         Call the provided tool `arxiv_search` with the user's query and RETURN ONLY the tool/function RESPONSE OBJECT (no additional commentary or text).
-        Do NOT emit any final text like "SEARCH COMPLETE" or other human-readable confirmations.
         The tool response will be consumed by the next agent.
     """,
-    tools=[arxiv_search],
+    tools=[arxiv_search, preload_tool],
     description="Search arXiv and write structured results to state",
     output_key="arxiv_candidates",
 )
@@ -566,17 +604,21 @@ async def search_papers(req: SearchRequest):
         "papers": [],
         "links": [],
         "human_readable": None,
+        "agent_final_text": "",
     })
 
     logging.info("HYBRID SEARCH q=%s maxr=%d", q, maxr)
 
     try:
+        count_invocation_plugin = CountInvocationPlugin()
+        app.state.count_invocation_plugin = count_invocation_plugin
+
         runner = Runner(
             agent=root_agent,
             app_name="agents",
             session_service=session_service,
             memory_service=memory_service,
-            plugins=[LoggingPlugin(), CountInvocationPlugin()],
+            plugins=[LoggingPlugin(), app.state.count_invocation_plugin],
         )
         async def _run_and_persist_session(runner: Runner, session_obj, user_text: str):
             final_response_text = None
@@ -635,7 +677,8 @@ async def search_papers(req: SearchRequest):
                 try:
                     if hasattr(memory_service, "add_session_to_memory"):
                         await memory_service.add_session_to_memory(session_obj)
-                        logger.info("session persisted to memory: user_id=%s session_id=%s", session_obj.user_id, session_obj.id)
+                        logger.info("session persisted to memory: user_id=%s session_id=%s",
+                                    session_obj.user_id, session_obj.id)
                     else:
                         logger.warning("memory_service missing add_session_to_memory; skipping persist")
                 except Exception:
@@ -650,21 +693,38 @@ async def search_papers(req: SearchRequest):
                         "agent_session_id": getattr(session_obj, "id", None),
                     })
                     app.state.last_agent_output = cur
-                    logger.info("attached runner events/final_text to last_agent_output (events=%d, final_present=%s)",
-                                len(events_seen), bool(final_response_text))
+                    logger.info(
+                        "attached runner events/final_text to last_agent_output (events=%d, final_present=%s)",
+                        len(events_seen), bool(final_response_text)
+                    )
                 except Exception:
                     logger.exception("failed to attach runner events to last_agent_output")
-                
-                final_text = app.state.last_agent_output.get("agent_final_text", "")
-                try:
-                    parsed = json.loads(final_text)
-                    logger.info("FINAL_AGENT_JSON_OK: keys=%s", list(parsed.keys()))
-                except Exception as e:
-                    logger.warning("FINAL_AGENT_JSON_PARSE_FAILED: %s; snippet=%s", str(e), final_text[:1000])
 
+                # safely inspect agent_final_text (run in finally block, after app.state.last_agent_output set)
+                try:
+                    final_text = app.state.last_agent_output.get("agent_final_text")
+                    if final_text is None:
+                        final_text = ""
+
+                    # quick guard: skip parsing empty or obviously-non-json strings
+                    ft_strip = final_text.strip()
+                    if not ft_strip:
+                        logger.info("FINAL_AGENT_JSON_PARSE_SKIPPED: agent_final_text empty")
+                    elif not (ft_strip.startswith("{") or ft_strip.startswith("[")):
+                        # not starting with JSON punctuation — still log snippet but skip heavy parse
+                        snippet = (ft_strip[:200] + "...") if len(ft_strip) > 200 else ft_strip
+                        logger.info("FINAL_AGENT_JSON_PARSE_SKIPPED: text does not start with JSON. snippet=%s", snippet)
+                    else:
+                        try:
+                            parsed = json.loads(final_text)
+                            logger.info("FINAL_AGENT_JSON_OK: keys=%s", list(parsed.keys()) if isinstance(parsed, dict) else "<non-dict-root>")
+                        except Exception as decode_err:
+                            snippet = (ft_strip[:1000] + "...") if ft_strip else "<empty>"
+                            logger.warning("FINAL_AGENT_JSON_PARSE_FAILED: %s; snippet=%s", str(decode_err), snippet)
+                except Exception:
+                    logger.exception("Error while finalizing runner events (non-fatal)")
 
             return final_response_text
-
 
         # create a session explicitly so add_session_to_memory has a session object to operate on
         session = await session_service.create_session(app_name=runner.app_name or "agents", user_id=str(uuid.uuid4()))
@@ -688,7 +748,15 @@ async def search_papers(req: SearchRequest):
     combined = "Summarize these papers in 1-3 sentences and return JSON with keys 'summary' and 'papers' (title+url):\n\n"
     combined += ("\n".join(parts) if parts else q)
 
+    start = time.perf_counter()
     summarizer_result = await remote_summary_extract(combined, remote_url=None, timeout_sec=30)
+    app.state.metrics = getattr(app.state, "metrics", {}) or {}
+    app.state.metrics["summarizer_ms"] = (time.perf_counter() - start) * 1000.0
+
+    try:
+        summarizer_result = merge_with_arxiv_candidates(summarizer_result, arxiv_candidates)
+    except Exception:
+        logging.exception("merge_with_arxiv_candidates failed (non-fatal)")
 
     try:
         raw_text = json.dumps(summarizer_result, ensure_ascii=False)
@@ -752,19 +820,13 @@ async def search_papers(req: SearchRequest):
 
 @app.get("/admin/metrics")
 def get_metrics():
-    """
-    Simple in-app metrics for reviewers: returns counts and last durations.
-    """
     try:
         metrics = getattr(app.state, "metrics", {}) or {}
         resp = {
-            "agent_count": metrics.get("agent_count"),
-            "llm_request_count": metrics.get("llm_request_count"),
-            "last_agent_run_ms": metrics.get("last_agent_run_ms"),
-            "last_llm_request_ms": metrics.get("last_llm_request_ms"),
-            "arxiv_search_ms": metrics.get("arxiv_search_ms"),
-            "upsert_ms": metrics.get("upsert_ms"),
-            "summarizer_ms": metrics.get("summarizer_ms")
+            "agent_count": int(metrics.get("agent_count") or 0),
+            "llm_request_count": int(metrics.get("llm_request_count") or 0),
+            "arxiv_search_ms": float(metrics.get("arxiv_search_ms") or 0.0),
+            "summarizer_ms": float(metrics.get("summarizer_ms") or 0.0)
         }
         return {"ok": True, "metrics": resp}
     except Exception as e:

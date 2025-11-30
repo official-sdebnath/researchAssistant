@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 import asyncio
 import json
 import re
+import urllib.parse
 
 load_dotenv()
 
@@ -40,14 +41,80 @@ remote_summarizer_agent = LlmAgent(
     ),
 )
 
-def extract_text_from_events(events) -> str:
-    """
-    Extract plain text from a list of events returned by the Runner.
-    """
+# URL regex helper
+URL_RE = re.compile(r"https?://[^\s'\"\)\]\}<>]+", re.IGNORECASE)
 
+def extract_json_from_text(s: str):
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except Exception:
+        cand = re.findall(r'(\{(?:.|\n)*\}|\[(?:.|\n)*\])', s)
+        if not cand:
+            return None
+        cand.sort(key=len, reverse=True)
+        for c in cand:
+            try:
+                return json.loads(c)
+            except Exception:
+                continue
+        return None
+
+def find_urls_in_text(s: str):
+    if not s:
+        return []
+    return list(dict.fromkeys(URL_RE.findall(s)))
+
+def ensure_papers_have_urls(parsed_obj, raw_text):
+    """
+    Ensure parsed_obj['papers'] is a list of dicts with 'title' and 'url'.
+    Try to rescue missing URLs from raw_text (markdown links, bare urls).
+    """
+    if not isinstance(parsed_obj, dict):
+        return parsed_obj
+    papers = parsed_obj.get("papers") or []
+    if not papers:
+        return parsed_obj
+    fallback_urls = find_urls_in_text(raw_text)
+    cleaned = []
+    for i, p in enumerate(papers):
+        if not isinstance(p, dict):
+            continue
+        title = (p.get("title") or "").strip()
+        url = (p.get("url") or p.get("link") or p.get("pdf_url") or "").strip()
+        # extract http inside if present
+        if url and not url.lower().startswith("http"):
+            found = URL_RE.findall(url)
+            url = found[0] if found else ""
+        # try find url near title occurrence
+        if not url and title and title in raw_text:
+            idx = raw_text.find(title)
+            if idx >= 0:
+                window = raw_text[idx: idx + 400]
+                found = URL_RE.findall(window)
+                if found:
+                    url = found[0]
+        # fallback to nth url from raw_text
+        if not url and i < len(fallback_urls):
+            url = fallback_urls[i]
+        # final normalize
+        if url:
+            url = url.strip().rstrip(').,')
+            try:
+                parsed = urllib.parse.urlparse(url)
+                if not parsed.scheme:
+                    url = ""
+            except Exception:
+                url = ""
+        if title or url:
+            cleaned.append({"title": title, "url": url})
+    parsed_obj["papers"] = cleaned
+    return parsed_obj
+
+def extract_text_from_events(events) -> str:
     if events is None:
         return ""
-
     def try_parse_json_from_str(s: str):
         if not s or len(s) < 20:
             return None
@@ -73,12 +140,10 @@ def extract_text_from_events(events) -> str:
             c = getattr(ev, "content", None)
             if c:
                 parts = getattr(c, "parts", None) or []
-
                 for p in parts:
                     t = getattr(p, "text", None)
                     if t and isinstance(t, str) and t.strip():
                         return t.strip()
-
                 for p in parts:
                     fr = getattr(p, "function_response", None)
                     if fr:
@@ -133,7 +198,6 @@ def extract_text_from_events(events) -> str:
                 pass
             return "remote_agent_malformed_function_call: summarizer attempted a tool-call but returned malformed function metadata."
         return last_str_fallback[:4000]
-
     return ""
 
 @app.post("/a2a")
@@ -142,6 +206,11 @@ async def a2a_call(payload: A2APayload):
         raise HTTPException(status_code=400, detail="query required")
 
     invocation_id = payload.invocation_id or str(uuid.uuid4())
+
+    # Debug: log incoming payload
+    logger.info("[a2a] incoming payload invocation_id=%s sender=%s query_len=%d docs_len=%d",
+                invocation_id, payload.sender, len((payload.query or "")), len(payload.docs or []))
+
     if payload.docs:
         parts = []
         for i, d in enumerate(payload.docs, 1):
@@ -153,7 +222,6 @@ async def a2a_call(payload: A2APayload):
             + "\n".join(parts)
         )
     else:
-        # directly forward query to the agent instruction (the agent will be forced to JSON)
         prompt = payload.query
 
     runner = Runner(
@@ -169,28 +237,24 @@ async def a2a_call(payload: A2APayload):
     else:
         events = res
 
+    # Debug: log raw events (first chunk)
+    try:
+        raw_events_str = str(events)[:4000]
+        logger.info("[a2a-debug] raw_events_preview=%s", raw_events_str)
+    except Exception:
+        logger.exception("[a2a-debug] failed to stringify events")
+
     result_text = extract_text_from_events(events) or ""
-    def extract_json_from_text(s: str):
-        if not s:
-            return None
-        try:
-            j = json.loads(s)
-            return j
-        except Exception:
-            cand = re.findall(r'(\{(?:.|\n)*\}|\[(?:.|\n)*\])', s)
-            if not cand:
-                return None
-            cand.sort(key=len, reverse=True)
-            for c in cand:
-                try:
-                    return json.loads(c)
-                except Exception:
-                    continue
-            return None
+    logger.info("[a2a-debug] extracted_text_len=%d", len(result_text))
+    logger.info("[a2a-debug] extracted_text_sample=%s", (result_text or "")[:2000])
 
     parsed = extract_json_from_text(result_text)
     if not parsed:
         parsed = extract_json_from_text(str(events))
+
+    # If we found JSON, try to rescue URLs from the raw text
+    if isinstance(parsed, dict):
+        parsed = ensure_papers_have_urls(parsed, result_text)
 
     # Validate shape: must be dict and have either 'summary'+ 'papers' or an 'error'
     valid = False
@@ -198,7 +262,7 @@ async def a2a_call(payload: A2APayload):
         if parsed.get("error") and isinstance(parsed.get("error"), str):
             valid = True
         elif isinstance(parsed.get("summary"), str) and isinstance(parsed.get("papers"), list):
-            # enforce up to 5 papers and each has title+url
+            # enforce up to 5 papers and each has title+url (url may be empty string if we couldn't find one)
             papers = parsed.get("papers")[:5]
             cleaned = []
             for p in papers:
@@ -206,14 +270,23 @@ async def a2a_call(payload: A2APayload):
                     continue
                 title = (p.get("title") or "").strip()
                 url = (p.get("url") or p.get("link") or "").strip()
-                if title and url:
-                    cleaned.append({"title": title, "url": url})
+                if url and not url.lower().startswith("http"):
+                    found = URL_RE.findall(url)
+                    url = found[0] if found else ""
+                cleaned.append({"title": title, "url": url})
             parsed["papers"] = cleaned
             valid = True
 
     if not valid:
-        # return an error shape to calling service so they always receive JSON
+        # return an error shape to calling service so they always receive JSON, include raw_text for debugging
         parsed = {"error": "remote_summarizer_malformed_output", "raw": result_text[:4000]}
 
-    logger.info("[a2a] invocation_id=%s sender=%s result_keys=%s", invocation_id, payload.sender, list(parsed.keys()))
+    # Debug: log final parsed result we will return
+    try:
+        logger.info("[a2a] invocation_id=%s sender=%s returning_keys=%s parsed_preview=%s",
+                    invocation_id, payload.sender, list(parsed.keys()) if isinstance(parsed, dict) else None,
+                    (json.dumps(parsed, ensure_ascii=False)[:1000] if isinstance(parsed, (dict, list)) else str(parsed)[:1000]))
+    except Exception:
+        logger.exception("[a2a] failed to log parsed output")
+
     return {"ok": True, "invocation_id": invocation_id, "result": parsed}

@@ -1,2 +1,106 @@
-2025-11-29 20:21:15,890 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
-2025-11-29 20:21:15,891 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-11-30 16:40:09,492 INFO root HYBRID SEARCH q=Ear drum perforation and tympanoplasty maxr=10
+2025-11-30 16:40:09,493 INFO google_adk.google.adk.plugins.plugin_manager Plugin 'logging_plugin' registered.
+2025-11-30 16:40:09,493 INFO google_adk.google.adk.plugins.plugin_manager Plugin 'count_invocation' registered.
+2025-11-30 16:40:09,499 INFO root [CountInvocationPlugin] Agent run #1 for agent=ResearchCoordinator
+2025-11-30 16:40:09,499 INFO root [CountInvocationPlugin] Agent run #2 for agent=arxiv_search_agent
+2025-11-30 16:40:09,505 INFO root [CountInvocationPlugin] LLM request #1; prompt_len=0
+2025-11-30 16:40:09,571 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-11-30 16:40:12,162 INFO root [timed_async] arxiv_search took 2668.0 ms
+2025-11-30 16:40:12,476 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-11-30 16:40:12,477 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-11-30 16:40:12,477 INFO root [CountInvocationPlugin] LLM response received in 0.0 ms
+2025-11-30 16:40:12,478 INFO researcher_assistant runner event: {'id': 'da97f449-774c-421f-a9aa-3ca97bcf626a', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 16:40:12,478 INFO researcher_assistant DEBUG: last runner events (full) for session=79b632e2-1cfd-4d26-bd97-f3e4da576afe
+2025-11-30 16:40:12,478 INFO researcher_assistant DEBUG_EVENT: {'id': 'da97f449-774c-421f-a9aa-3ca97bcf626a', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 16:40:12,478 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 16:40:13,432 INFO researcher_assistant runner event: {'id': 'a461a08f-28a3-477b-af34-04d81d93d6af', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 16:40:13,432 INFO researcher_assistant DEBUG: last runner events (full) for session=79b632e2-1cfd-4d26-bd97-f3e4da576afe
+2025-11-30 16:40:13,432 INFO researcher_assistant DEBUG_EVENT: {'id': 'da97f449-774c-421f-a9aa-3ca97bcf626a', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 16:40:13,432 INFO researcher_assistant DEBUG_EVENT: {'id': 'a461a08f-28a3-477b-af34-04d81d93d6af', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 16:40:13,432 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 16:40:13,433 INFO root [CountInvocationPlugin] LLM request #2; prompt_len=0
+2025-11-30 16:40:13,433 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-11-30 16:40:14,820 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-11-30 16:40:14,821 INFO root [CountInvocationPlugin] LLM response received in 0.0 ms
+2025-11-30 16:40:14,821 INFO researcher_assistant runner event: {'id': '9204d216-ba66-48aa-aeb3-c1e87411da3f', 'author': 'arxiv_search_agent', 'type': None}
+2025-11-30 16:40:14,821 INFO researcher_assistant DEBUG: last runner events (full) for session=79b632e2-1cfd-4d26-bd97-f3e4da576afe
+2025-11-30 16:40:14,821 INFO researcher_assistant DEBUG_EVENT: {'id': 'da97f449-774c-421f-a9aa-3ca97bcf626a', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 16:40:14,821 INFO researcher_assistant DEBUG_EVENT: {'id': 'a461a08f-28a3-477b-af34-04d81d93d6af', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 16:40:14,821 INFO researcher_assistant DEBUG_EVENT: {'id': '9204d216-ba66-48aa-aeb3-c1e87411da3f', 'author': 'arxiv_search_agent', 'type': None}
+2025-11-30 16:40:14,821 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 16:40:14,821 INFO researcher_assistant session persisted to memory: user_id=79ab709b-4cf1-485c-8451-72dd64404623 session_id=79b632e2-1cfd-4d26-bd97-f3e4da576afe
+2025-11-30 16:40:14,821 INFO researcher_assistant attached runner events/final_text to last_agent_output (events=3, final_present=False)
+2025-11-30 16:40:14,821 INFO researcher_assistant FINAL_AGENT_JSON_PARSE_SKIPPED: agent_final_text empty
+2025-11-30 16:40:15,138 INFO root Published last_agent_output (summary_present=True, papers=5)
+2025-11-30 18:38:29,193 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-11-30 18:38:29,193 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-11-30 18:40:04,035 INFO root HYBRID SEARCH q=lungcancer and diabetes maxr=10
+2025-11-30 18:40:04,037 INFO google_adk.google.adk.plugins.plugin_manager Plugin 'logging_plugin' registered.
+2025-11-30 18:40:04,038 INFO google_adk.google.adk.plugins.plugin_manager Plugin 'count_invocation' registered.
+2025-11-30 18:40:04,046 INFO root [CountInvocationPlugin] Agent run #1 for agent=ResearchCoordinator
+2025-11-30 18:40:04,046 INFO root [CountInvocationPlugin] Agent run #2 for agent=arxiv_search_agent
+2025-11-30 18:40:04,054 INFO root [CountInvocationPlugin] LLM request #1; prompt_len=0
+2025-11-30 18:40:04,126 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-11-30 18:40:05,724 INFO root [timed_async] arxiv_search took 1685.6 ms
+2025-11-30 18:40:06,534 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-11-30 18:40:06,534 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-11-30 18:40:06,534 INFO root [CountInvocationPlugin] LLM response received in 0.0 ms
+2025-11-30 18:40:06,534 INFO researcher_assistant runner event: {'id': 'bf4140e8-8ecc-4027-9a0c-1d1793256980', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:40:06,535 INFO researcher_assistant DEBUG: last runner events (full) for session=0d9ed319-e8ce-4a20-bc76-147632010cbf
+2025-11-30 18:40:06,535 INFO researcher_assistant DEBUG_EVENT: {'id': 'bf4140e8-8ecc-4027-9a0c-1d1793256980', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:40:06,535 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 18:40:07,568 INFO researcher_assistant runner event: {'id': 'a12d2404-ee64-4874-933c-c508c3b67bcd', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:40:07,568 INFO researcher_assistant DEBUG: last runner events (full) for session=0d9ed319-e8ce-4a20-bc76-147632010cbf
+2025-11-30 18:40:07,568 INFO researcher_assistant DEBUG_EVENT: {'id': 'bf4140e8-8ecc-4027-9a0c-1d1793256980', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:40:07,568 INFO researcher_assistant DEBUG_EVENT: {'id': 'a12d2404-ee64-4874-933c-c508c3b67bcd', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:40:07,568 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 18:40:07,569 INFO root [CountInvocationPlugin] LLM request #2; prompt_len=0
+2025-11-30 18:40:07,569 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-11-30 18:40:09,127 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-11-30 18:40:09,127 INFO root [CountInvocationPlugin] LLM response received in 0.0 ms
+2025-11-30 18:40:09,127 INFO researcher_assistant runner event: {'id': '3781e216-1aa7-4f85-8003-935aa2342089', 'author': 'arxiv_search_agent', 'type': None}
+2025-11-30 18:40:09,127 INFO researcher_assistant DEBUG: last runner events (full) for session=0d9ed319-e8ce-4a20-bc76-147632010cbf
+2025-11-30 18:40:09,127 INFO researcher_assistant DEBUG_EVENT: {'id': 'bf4140e8-8ecc-4027-9a0c-1d1793256980', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:40:09,127 INFO researcher_assistant DEBUG_EVENT: {'id': 'a12d2404-ee64-4874-933c-c508c3b67bcd', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:40:09,127 INFO researcher_assistant DEBUG_EVENT: {'id': '3781e216-1aa7-4f85-8003-935aa2342089', 'author': 'arxiv_search_agent', 'type': None}
+2025-11-30 18:40:09,127 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 18:40:09,127 INFO researcher_assistant session persisted to memory: user_id=b33cd422-7013-47e8-acf5-e83f0c14ad6d session_id=0d9ed319-e8ce-4a20-bc76-147632010cbf
+2025-11-30 18:40:09,127 INFO researcher_assistant attached runner events/final_text to last_agent_output (events=3, final_present=False)
+2025-11-30 18:40:09,127 INFO researcher_assistant FINAL_AGENT_JSON_PARSE_SKIPPED: agent_final_text empty
+2025-11-30 18:40:09,847 INFO root Published last_agent_output (summary_present=True, papers=5)
+2025-11-30 18:56:34,477 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-11-30 18:56:34,477 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-11-30 18:57:16,788 INFO root HYBRID SEARCH q=ai and security maxr=10
+2025-11-30 18:57:16,789 INFO google_adk.google.adk.plugins.plugin_manager Plugin 'logging_plugin' registered.
+2025-11-30 18:57:16,789 INFO google_adk.google.adk.plugins.plugin_manager Plugin 'count_invocation' registered.
+2025-11-30 18:57:16,797 INFO root [CountInvocationPlugin] Agent run #1 for agent=ResearchCoordinator
+2025-11-30 18:57:16,797 INFO root [CountInvocationPlugin] Agent run #2 for agent=arxiv_search_agent
+2025-11-30 18:57:16,803 INFO root [CountInvocationPlugin] LLM request #1; prompt_len=0
+2025-11-30 18:57:16,865 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-11-30 18:57:19,632 INFO root [timed_async] arxiv_search took 2840.8 ms
+2025-11-30 18:57:19,892 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-11-30 18:57:19,892 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-11-30 18:57:19,892 INFO root [CountInvocationPlugin] LLM response received in 0.0 ms
+2025-11-30 18:57:19,893 INFO researcher_assistant runner event: {'id': '98479ff9-a3db-497a-a22f-d4e84e057c35', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:57:19,893 INFO researcher_assistant DEBUG: last runner events (full) for session=f583c29f-923c-45ee-9b19-35138045efcc
+2025-11-30 18:57:19,893 INFO researcher_assistant DEBUG_EVENT: {'id': '98479ff9-a3db-497a-a22f-d4e84e057c35', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:57:19,893 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 18:57:20,912 INFO researcher_assistant runner event: {'id': 'dad38e95-338d-474f-b82a-eb5bc6c2b608', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:57:20,912 INFO researcher_assistant DEBUG: last runner events (full) for session=f583c29f-923c-45ee-9b19-35138045efcc
+2025-11-30 18:57:20,912 INFO researcher_assistant DEBUG_EVENT: {'id': '98479ff9-a3db-497a-a22f-d4e84e057c35', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:57:20,912 INFO researcher_assistant DEBUG_EVENT: {'id': 'dad38e95-338d-474f-b82a-eb5bc6c2b608', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:57:20,912 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 18:57:20,913 INFO root [CountInvocationPlugin] LLM request #2; prompt_len=0
+2025-11-30 18:57:20,913 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-11-30 18:57:22,380 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-11-30 18:57:22,380 INFO root [CountInvocationPlugin] LLM response received in 0.0 ms
+2025-11-30 18:57:22,380 INFO researcher_assistant runner event: {'id': 'af10da63-0fa0-42c5-90d8-635e5716a8ba', 'author': 'arxiv_search_agent', 'type': None}
+2025-11-30 18:57:22,380 INFO researcher_assistant DEBUG: last runner events (full) for session=f583c29f-923c-45ee-9b19-35138045efcc
+2025-11-30 18:57:22,380 INFO researcher_assistant DEBUG_EVENT: {'id': '98479ff9-a3db-497a-a22f-d4e84e057c35', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:57:22,380 INFO researcher_assistant DEBUG_EVENT: {'id': 'dad38e95-338d-474f-b82a-eb5bc6c2b608', 'author': 'arxiv_search_agent', 'type': None, 'text_snippet': ''}
+2025-11-30 18:57:22,380 INFO researcher_assistant DEBUG_EVENT: {'id': 'af10da63-0fa0-42c5-90d8-635e5716a8ba', 'author': 'arxiv_search_agent', 'type': None}
+2025-11-30 18:57:22,380 INFO researcher_assistant DEBUG last_agent_output: ""
+2025-11-30 18:57:22,380 INFO researcher_assistant session persisted to memory: user_id=01648125-883e-4ead-a25d-57c36ff3942f session_id=f583c29f-923c-45ee-9b19-35138045efcc
+2025-11-30 18:57:22,380 INFO researcher_assistant attached runner events/final_text to last_agent_output (events=3, final_present=False)
+2025-11-30 18:57:22,380 INFO researcher_assistant FINAL_AGENT_JSON_PARSE_SKIPPED: agent_final_text empty
+2025-11-30 18:57:23,965 INFO root Published last_agent_output (summary_present=True, papers=5)
