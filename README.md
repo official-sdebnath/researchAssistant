@@ -5,7 +5,6 @@ A production‑style, multi‑agent research assistant that supports:
 - **ArXiv search**
 - **Remote A2A summarization**
 - **Sequential multi‑agent orchestration**
-- **Vector DB indexing using Pinecone - Optional**
 - **Observability, metrics, logging**
 - **Sessions & memory**
 - **Evaluation**
@@ -35,19 +34,34 @@ A production‑style, multi‑agent research assistant that supports:
 **Researcher Assistant** automates literature search and review process for researchers.  
 Given a user query (for example `"federated learning"`), the system:
 
-1. Searches arXiv using a custom `arxiv_search` tool.  
-2. Normalizes titles, abstracts, authors and pdf links.  
-3. Assembles a combined prompt and sends it to a **remote summarizer** running as a separate service (A2A).  
-4. Receives a strict JSON summary and list of top papers.  
-5. Optionally upserts the results into Pinecone for vector retrieval. It is for experiemental and monitoring purposes.  
-6. Tracks metrics, logs, and provides small admin endpoints for inspection.
+The system follows a two-stage agent sequential workflow controlled by a root coordinator agent.
 
-This repo demonstrates the important agent concepts required by the Kaggle's Google Agents Intensive - Capstone Project: multi‑agent orchestration, tools, A2A, sessions & memory, observability, evaluation harness, and deployment.
+**Step 1: User Query → Root Agent**
+- The process starts when the user submits keywords or a natural-language query through the /search API.
+- The root agent (ResearchCoordinator) receives this message and begins the sequence.
+
+**Stage 2: Search Agent** 
+- The root agent invokes the search agent as the first agent in the chain.
+- This agent’s only job is to call the arxiv_search tool with the user query.
+- The tool retrieves relevant arXiv papers (title, abstract, authors, PDF link).
+- The search agent returns only the structured tool response, which becomes the input for the next agent.
+
+**Stage 3: Final Summarizer Agent**
+- Once the search stage completes, the root agent triggers the final summarizer agent.
+- This agent compiles the retrieved titles + abstracts into a single combined text payload.
+- It then calls a remote summarizer using the ADK A2A protocol.
+- The remote summarizer (A2A remote agent) is a separate FastAPI service running a specialized summarizer agent. It receives the request from the main system. 
+- The remote agent processes this payload and returns a strict JSON output containing - Summary,  Relevant titles & links.
+- The final summarizer agent processes the JSON returned by the remote agent and formats a user-facing answer containing: Summary, relevant paper titles, and direct URLs.
+
+For demonstration, the system uses ADK Web UI exactly like the course notebooks, so the agent events, function calls, and final outputs can be visually inspected.
+
+
+The repo demonstrates the important agent concepts required by the Kaggle's Google Agents Intensive - Capstone Project: multi‑agent orchestration, tools, A2A, sessions & memory, observability, evaluation harness, and deployment.
 
 ---
 
 ## Architecture
-
 
 ![Project Flow Diagram](image.png)
 
@@ -66,6 +80,7 @@ Purpose of project files:
 - `agents/agent.py`: Triggers the web UI to use the agents involved in the project. When using adk web ui, you will see a option to select agents.
 - `models/model.py`: Store all teh pydantic based validation schemas used in project
 - `.gitignore`: List all the files and folders for git not to track to
+- `image.png`: Architecture diagram
 ---
 
 ## Agents & tools
@@ -78,15 +93,11 @@ Purpose of project files:
 - **root_agent** (SequentialAgent)
   - Runs `search_agent` then `final_agent` in sequence to produce the final result.
 - **remote_summarizer_agent** (running in `remote_agent.py`)
-  - Forced to output a single valid JSON object with keys `summary` and `papers` (each paper has `title` and `url`).
+  - Outputs a single valid JSON object with keys `summary` and `papers` (each paper has `title` and `url`).
 
 ### Tools
 - `arxiv_search` — custom async fetcher (aiohttp + feedparser).
 - `summarizer` — FunctionTool wrapper for `remote_summary_extract()` / A2A.
-- Pinecone helpers:
-  - `prepare_and_upsert(dense_index, records, namespace="arxiv")`
-  - `retrieve_from_pinecone(query, top_k=5, namespace="arxiv")`
-
 
 ---
 
@@ -117,7 +128,7 @@ This separation demonstrates a real cross‑service agent integration (A2A) and 
 
 **Admin endpoints**
 - `GET /admin/metrics` — returns a small JSON object with metrics such as:
-  - `agent_count`, `llm_request_count`, `last_agent_run_ms`, `last_llm_request_ms`, `arxiv_search_ms`, `summarizer_ms`, `upsert_ms`.
+  - `agent_count`, `llm_request_count`, `arxiv_search_ms`, `summarizer_ms`.
 - `GET /admin/last_agent_output` — returns the most recent agent output blob (summary, papers, raw_text, local debug blob).
 - `GET /debug/watch_last_output?duration_sec=10` — pollable endpoint returning a timeline of observed last outputs (useful for debugging during long runs).
 
@@ -212,27 +223,22 @@ GET http://localhost:8000/debug/watch_last_output?duration_sec=10&poll_interval=
 **Example `.env` keys**
 ```
 GOOGLE_API_KEY=...
-PINECONE_API_KEY=...
-PINECONE_INDEX=...
-PINECONE_ENVIRONMENT=us-east-1
-PINECONE_CLOUD=...
-PINECONE_MODEL=...
-EMBEDDING_DIMENSION=1536
 ARXIV_API=https://export.arxiv.org/api/query
 REMOTE_SUMMARIZER_MODEL=gemini-2.5-flash-lite
 ```
 
-**No Pinecone / local demo mode**
-- If Pinecone credentials are not present, the app will attempt a defensive flow:
-  - `prepare_and_upsert` will be skipped if `app.state.dense_index` is not present.
-  - A local mirror (`app.state._local_index`) will still be used for retrieval examples.
-- To run without Pinecone:
-  - Omit Pinecone env vars and start the services. The pipeline will still run, but upserts will be disabled.
-
-**Common issues**
-- _Runner returns 429 RESOURCE_EXHAUSTED_: your LLM quota is exhausted or retries triggered. Reduce QPM or use a local small model.
-- _remote A2A returns malformed JSON_: remote summarizer is required to return strict JSON; check `remote_agent` logs for parsing failures.
-- _evaluate.py fails discovery_: ensure `_extract_agent_text` exists in the module or modify `evaluate.py` to point at a helper function included in the repo.
+**Limitations**
+- The system currently retrieves only the top 5 arXiv papers per query due to prompt/token constraints in downstream summarization.
+- The implementation focuses on demonstrating Google ADK concepts based on the course notebooks; therefore, certain production-level edge cases (timeouts, malformed metadata, retry logic) are only lightly handled.
+- Only one domain-specific search tool (arXiv search) is implemented. This can be extended to multiple sources (PubMed, Semantic Scholar, IEEE Xplore, Google Search API).
+- Occasional agent flow interruptions can occur due to model overload or transient rate-limit spikes, although these are rare and recover automatically.
+- The remote summarizer agent currently uses a single-pass LLM summary, without iterative refinement or multi-round summarization.
+- The system does not yet support long-running operations (pause/resume) or resumability flows, which means complex workflows cannot be paused and continued later.
+- Memory is stored using `InMemorySessionService` and `InMemoryMemoryService`, so sessions are not persistent across server restarts.
+- The summarizer relies entirely on titles and abstracts; full-text PDFs are not downloaded or parsed, which limits deeper summarization.
+- No advanced ranking or relevance scoring is applied—results depend entirely on arXiv’s default relevance ranking.
+- Evaluation covers summary correctness and JSON structure, but does not include robustness testing such as adversarial queries or malformed inputs.
+- Many functionalities of the project may be over-engineered, but this was done to evade incoming errors or to showcase/test my learning ability and understanding of the course. 
 
 ---
 
@@ -250,7 +256,7 @@ REMOTE_SUMMARIZER_MODEL=gemini-2.5-flash-lite
 ├── README.md
 ├── agents/
 │    └── agent.py
-├── .env_sample
+├── .env
 ├── .gitignore
 ├── requirements.txt
 ```
@@ -276,7 +282,6 @@ REMOTE_SUMMARIZER_MODEL=gemini-2.5-flash-lite
 - **Ports**: `app.py` (8000), `remote_agent.py` (9001), `adk web` (8080).
 - **Evaluator**: `evaluate.py` is provided to replicate structured tests. It expects an `_extract_agent_text` helper — the repo includes extractors in `app.py` and `remote_agent.py`.
 - **Persistence tradeoff**: InMemory session/memory is chosen for demonstartion in Capstone Project only.
-- **Reproducibility**: If reviewers have no Pinecone account, tests still run if you skip the upsert step — provide empty/missing Pinecone keys.
 
 ---
 
