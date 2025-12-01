@@ -1,50 +1,54 @@
 import json
 import time
 import asyncio
-import importlib.util
+import re
 from pathlib import Path
 from typing import Any, Dict, List
-import re
+
+# Evaluator for the Researcher Assistant project.
+# Runs the root_agent on a small eval set and writes a JSON report.
+
+import app
 
 ROOT = Path(__file__).parent
 
-evalset = json.load(open(ROOT / "integration.evalset.json", "r"))
-config = json.load(open(ROOT / "test_config.json", "r"))
+# Load eval set
+evalset_path = ROOT / "integration.evalset.json"
+with open(evalset_path, "r") as f:
+    evalset = json.load(f)
 
-# discover module (auto)
-def discover_project_module() -> Any:
-    for p in ROOT.glob("*.py"):
-        if p.name in ("evaluate.py"):
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location(p.stem, str(p))
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            required = ["root_agent", "Runner", "session_service", "_extract_agent_text"]
-            if all(hasattr(mod, name) for name in required):
-                print(f"[discover] using module: {p.name}")
-                return mod
-        except Exception:
-            continue
-    raise RuntimeError("Could not find a project module exposing required symbols (root_agent, Runner, session_service, _extract_agent_text).")
+# Criteria for evaluation
+config_path = ROOT / "test_config.json"
+if config_path.exists():
+    with open(config_path, "r") as f:
+        config = json.load(f)
+else:
+    config = {}
 
-mod = discover_project_module()
-root_agent = getattr(mod, "root_agent")
-Runner = getattr(mod, "Runner")
-session_service = getattr(mod, "session_service")
-_extract_agent_text = getattr(mod, "_extract_agent_text")
+# Symbols pulled from app.py
+root_agent = app.root_agent
+Runner = app.Runner
+session_service = app.session_service
 
-# small helper to try parsing a JSON block and return object or None
-def safe_parse_json(text: str):
+
+# ---------------- Utility helpers ----------------
+
+def safe_parse_json(text: str) -> Any:
+    """Try json.loads; if that fails, pull the largest JSON-looking block and parse that."""
     if not text:
         return None
+
     s = text.strip()
     try:
         return json.loads(s)
     except Exception:
         pass
-    # extract largest {...} or [...] block
+
+    # Extract any {...} or [...] spans and try the largest first
     candidates = re.findall(r'(\{(?:.|\n)*\}|\[(?:.|\n)*\])', s)
+    if not candidates:
+        return None
+
     candidates.sort(key=len, reverse=True)
     for cand in candidates:
         try:
@@ -53,246 +57,168 @@ def safe_parse_json(text: str):
             continue
     return None
 
-# simple token-overlap similarity (robust enough)
+
 def similarity_score(a: str, b: str) -> float:
+    """Token-overlap similarity on lowercased words."""
     a_s, b_s = (a or "").strip().lower(), (b or "").strip().lower()
     if not a_s and not b_s:
         return 1.0
     if not a_s or not b_s:
         return 0.0
+
     a_tokens = set(a_s.split())
     b_tokens = set(b_s.split())
-    return len(a_tokens.intersection(b_tokens)) / max(1, len(b_tokens))
+    if not b_tokens:
+        return 0.0
 
-def extract_tool_names_from_events(events) -> List[str]:
-    names = []
-    if not events:
-        return names
-    candidate_tools = {"arxiv_search", "remote_summarizer_tool", "prepare_and_upsert", "retrieve_from_pinecone"}
-    if isinstance(events, list):
-        for ev in events:
-            try:
-                if hasattr(ev, "tool_name"):
-                    names.append(getattr(ev, "tool_name"))
-                s = str(ev).lower()
-                for t in candidate_tools:
-                    if t in s:
-                        names.append(t)
-            except Exception:
-                continue
-    else:
-        s = str(events).lower()
-        for t in candidate_tools:
-            if t in s:
-                names.append(t)
-    # stable dedupe
-    seen = []
-    for n in names:
-        if n and n not in seen:
-            seen.append(n)
-    return seen
+    return len(a_tokens.intersection(b_tokens)) / len(b_tokens)
 
-def robust_extract_text(events) -> str:
-    """More aggressive extractor for Google ADK event objects and function responses."""
-    # 1) try project helper
-    try:
-        txt = _extract_agent_text(events)
-        if txt and isinstance(txt, str) and txt.strip():
-            return txt.strip()
-    except Exception:
-        pass
 
+def extract_text_from_events(events) -> str:
+    """
+    Pull the most useful text out of a Google ADK event sequence.
+
+    Priority (from last event backwards):
+      1) content.parts[*].text
+      2) event.text
+      3) str(last event)
+    """
     if not events:
         return ""
 
-    def inspect_ev(ev):
-        # Try structured access first
+    ev_list = events if isinstance(events, list) else [events]
+
+    for ev in reversed(ev_list):
         try:
-            # Some events have .content with .parts (ADK)
             content = getattr(ev, "content", None)
-            if content:
+            if content is not None:
                 parts = getattr(content, "parts", None) or []
-                # prefer explicit text parts
                 for p in parts:
-                    if getattr(p, "text", None):
-                        t = p.text.strip()
-                        if t:
-                            return t
-                # then inspect function_response objects in parts
-                for p in parts:
-                    fr = getattr(p, "function_response", None)
-                    if fr:
-                        resp = getattr(fr, "response", None)
-                        # if dict, prefer summary keys
-                        if isinstance(resp, dict):
-                            for k in ("summary", "result_text", "result", "text", "body", "response"):
-                                if k in resp and isinstance(resp[k], str) and resp[k].strip():
-                                    return resp[k].strip()
-                            # fallback: first long string value
-                            for v in resp.values():
-                                if isinstance(v, str) and v.strip():
-                                    return v.strip()
-                        # otherwise fallback to string form
-                        s = str(resp)
-                        if s and len(s) > 10:
-                            return s.strip()
-                # if nothing useful, try parts' function_call payloads (string form)
-                for p in parts:
-                    if getattr(p, "function_call", None):
-                        s = str(getattr(p, "function_call"))
-                        if s and len(s) > 10:
-                            # attempt to extract embedded JSON from it
-                            parsed = safe_parse_json(s)
-                            if parsed:
-                                if isinstance(parsed, dict):
-                                    if parsed.get("summary"):
-                                        return parsed.get("summary").strip()
-                                    return json.dumps(parsed)[:2000]
-                            return s.strip()
-            # If event has attributes like .tool_name or .text
-            if hasattr(ev, "text") and getattr(ev, "text", None):
-                return ev.text.strip()
+                    txt = getattr(p, "text", None)
+                    if isinstance(txt, str) and txt.strip():
+                        return txt.strip()
+
+            ev_text = getattr(ev, "text", None)
+            if isinstance(ev_text, str) and ev_text.strip():
+                return ev_text.strip()
         except Exception:
-            pass
+            continue
 
-        # Last resort: try to parse large JSON blobs from the str() representation
-        s = str(ev)
-        if s:
-            parsed = safe_parse_json(s)
-            if isinstance(parsed, dict):
-                if parsed.get("summary"):
-                    return parsed.get("summary").strip()
-                # if it has 'papers' + 'summary' prefer summary
-                if parsed.get("papers") and parsed.get("summary"):
-                    return parsed["summary"].strip()
-                # otherwise return compact JSON string
-                try:
-                    return json.dumps(parsed)
-                except Exception:
-                    return s[:3000]
-            # If it contains function_call or MALFORMED_FUNCTION_CALL just return the string,
-            # evaluator will treat presence of these tokens as evidence (keyword_hit).
-            if "function_call" in s or "MALFORMED_FUNCTION_CALL" in s or "invocation_id" in s:
-                return s
-        return None
+    # Last resort: string form of the last event
+    try:
+        return str(ev_list[-1])
+    except Exception:
+        return ""
 
-    if isinstance(events, list):
-        # prefer last non-empty extraction
-        for ev in reversed(events):
-            out = inspect_ev(ev)
-            if out:
-                return out
-    else:
-        out = inspect_ev(events)
-        if out:
-            return out
-    return ""
+
+# ---------------- Core evaluation logic ----------------
 
 async def run_case(case: Dict) -> Dict:
-    user_msg = case["conversation"][0]["user_content"]["parts"][0]["text"]
-    expected_text = case["conversation"][0].get("final_response", {}).get("parts", [{}])[0].get("text", "")
-    expected_tools = [t.get("name") for t in case["conversation"][0].get("intermediate_data", {}).get("tool_uses", [])]
+    """
+    Run one eval case:
+      - Send the user message through root_agent via Runner.run_debug(...)
+      - Extract final text from events
+      - Compare against the expected text
+    """
+    conv = case["conversation"][0]
 
-    # # derive a safe app_name (FastAPI has .title)
-    # module_app = getattr(mod, "app", None)
-    # if module_app is not None:
-    #     app_name = getattr(module_app, "title", None) or getattr(mod, "__name__", "agents")
-    # else:
-    #     app_name = getattr(mod, "__name__", "agents")
+    user_msg = conv["user_content"]["parts"][0]["text"]
+    expected_text = ""
+    if "final_response" in conv:
+        parts = conv["final_response"].get("parts", [])
+        if parts:
+            expected_text = parts[0].get("text", "") or ""
 
     runner = Runner(agent=root_agent, app_name="agents", session_service=session_service)
 
     start = time.perf_counter()
     try:
-        events = await runner.run_debug(user_msg)
-    except TypeError:
-        events = runner.run_debug(user_msg)
+        maybe = runner.run_debug(user_msg)
+        # run_debug can be sync or async depending on ADK version
+        events = await maybe if asyncio.iscoroutine(maybe) else maybe
+    except Exception as e:
+        elapsed = time.perf_counter() - start
+        return {
+            "eval_id": case.get("eval_id"),
+            "user_msg": user_msg,
+            "error": str(e),
+            "elapsed_sec": elapsed,
+            "passed": False,
+        }
     elapsed = time.perf_counter() - start
 
-    actual_text = robust_extract_text(events) or ""
+    actual_text = extract_text_from_events(events) or ""
 
-    # if the returned text is JSON-like with a 'summary' field, prefer that summary
+    # If the agent returns JSON with a "summary" field, compare on that
     parsed = safe_parse_json(actual_text)
-    if isinstance(parsed, dict) and isinstance(parsed.get("summary"), str) and parsed.get("summary").strip():
-        compare_text = parsed.get("summary").strip()
+    if isinstance(parsed, dict) and isinstance(parsed.get("summary"), str) and parsed["summary"].strip():
+        compare_text = parsed["summary"].strip()
     else:
         compare_text = actual_text
 
-    # output markers (evidence) — used only if we fail to extract meaningful text
-    lowered = (actual_text or "").lower()
-    output_markers = ("function_call", "invocation_id", "functionresponse", '{"papers":', '"summary":', "model_version")
-    # normalized apology variants
-    apology_markers = (
-        "could not find",
-        "couldn't find",
-        "no arxiv papers",
-        "i could not find",
-        "i'm sorry",
-        "i am sorry",
-        "cannot fulfill",
-        "could not find any",
-        "does not seem to be a valid topic",
-        "please try again",
-        "no relevant papers",
-    )    
-    
-    keyword_hit = any(tok in lowered for tok in output_markers) or any(tok in lowered for tok in apology_markers)
-
-    resp_score = similarity_score(compare_text, expected_text)
-    used_tools = extract_tool_names_from_events(events)
-
-    if not expected_tools:
-        tool_score = 1.0
-    else:
-        hits = sum(1 for t in expected_tools if t in used_tools)
-        tool_score = hits / max(1, len(expected_tools))
-
-    # threshold from config (default relaxed to 0.5)
     resp_threshold = float(config.get("criteria", {}).get("response_match_score", 0.5))
-    passed = (resp_score >= resp_threshold) or (keyword_hit and tool_score >= 0.5)
+    resp_score = similarity_score(compare_text, expected_text)
+    passed = resp_score >= resp_threshold
 
     return {
         "eval_id": case.get("eval_id"),
         "user_msg": user_msg,
-        "expected_tools": expected_tools,
-        "used_tools": used_tools,
-        "response_similarity": resp_score,
-        "keyword_hit": bool(keyword_hit),
-        "tool_trajectory_score": tool_score,
-        "elapsed_sec": elapsed,
+        "expected_text": expected_text,
         "actual_text": actual_text,
-        "passed": bool(passed)
+        "compare_text": compare_text,
+        "response_similarity": resp_score,
+        "threshold": resp_threshold,
+        "elapsed_sec": elapsed,
+        "passed": bool(passed),
     }
 
+
 async def main():
-    results = []
+    results: List[Dict] = []
+
     for case in evalset.get("eval_cases", []):
         print("Running:", case.get("eval_id"))
         try:
             r = await run_case(case)
             results.append(r)
-            print(f"  passed={r['passed']}, resp_sim={r['response_similarity']:.3f}, tool_score={r['tool_trajectory_score']:.3f}, time={r['elapsed_sec']:.2f}s")
+
+            status = "PASS" if r["passed"] else "FAIL"
+            sim = r.get("response_similarity", 0.0)
+            thr = r.get("threshold", 0.0)
+            print(
+                f"  [{status}] resp_sim={sim:.3f} (threshold={thr:.3f}), "
+                f"time={r['elapsed_sec']:.2f}s"
+            )
         except Exception as e:
-            print("  ERROR:", e)
+            print("  [ERROR]", e)
             results.append({"eval_id": case.get("eval_id"), "error": str(e)})
 
-    out = {"run_at": time.ctime(), "results": results, "config": config}
+    # Simple pass/fail summary
+    passed_cases = [r for r in results if r.get("passed")]
+    failed_cases = [r for r in results if r.get("passed") is False]
+
+    print("\n=== Evaluation Summary ===")
+    print(f"Total cases: {len(results)}")
+    print(f"Passed     : {len(passed_cases)}")
+    print(f"Failed     : {len(failed_cases)}")
+
+    if passed_cases:
+        print("  Passed eval_ids:", ", ".join(r.get("eval_id", "?") for r in passed_cases))
+    if failed_cases:
+        print("  Failed eval_ids:", ", ".join(r.get("eval_id", "?") for r in failed_cases))
+
+    out = {
+        "run_at": time.ctime(),
+        "results": results,
+        "config": config,
+    }
+
     out_path = ROOT / "eval_report.json"
     with open(out_path, "w") as f:
         json.dump(out, f, indent=2)
-    print("Saved report to", out_path)
 
-    # best-effort cleanup: close session_service and allow background http sessions to close
-    try:
-        if hasattr(session_service, "close") and callable(session_service.close):
-            maybe = session_service.close()
-            if asyncio.iscoroutine(maybe):
-                await maybe
-    except Exception:
-        pass
+    print("\nSaved report to", out_path)
 
-    # brief pause to let aiohttp connectors terminate gracefully
-    await asyncio.sleep(0.25)
 
 if __name__ == "__main__":
     asyncio.run(main())

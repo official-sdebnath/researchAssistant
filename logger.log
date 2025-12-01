@@ -35,3 +35,114 @@
 2025-12-01 03:42:22,055 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
 2025-12-01 03:59:42,072 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
 2025-12-01 03:59:42,073 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:23:03,084 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:23:03,084 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:33:37,144 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:33:37,144 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:33:38,984 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:33:38,984 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:33:38,990 WARNING root Failed to preload memory for query: Find recent arXiv papers about "federated learning" and give a short 2-sentence summary.
+2025-12-01 22:33:39,057 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:33:40,209 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:33:40,209 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-12-01 22:33:40,924 WARNING root Failed to preload memory for query: Find recent arXiv papers about "federated learning" and give a short 2-sentence summary.
+2025-12-01 22:33:40,924 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:33:42,378 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:33:42,423 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:33:49,153 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:33:49,155 WARNING root Failed to preload memory for query: Find arXiv papers about "qwertyuiop_nonexistent_topic_12345" and summarize.
+2025-12-01 22:33:49,155 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:33:50,234 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:33:50,235 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:33:56,268 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:33:56,268 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-12-01 22:33:56,269 INFO researcher_assistant [summarizer_tool] called; query_len=397 docs_len=3
+2025-12-01 22:33:58,563 INFO researcher_assistant [summarizer_tool] summarizer returned summary_len=611 papers_len=3
+2025-12-01 22:33:58,563 INFO researcher_assistant [summarizer_tool] first_paper_has_link=True
+2025-12-01 22:33:58,563 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:34:00,048 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:34:00,262 ERROR asyncio Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x12d845340>
+2025-12-01 22:34:00,262 ERROR asyncio Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x12d846720>
+2025-12-01 22:34:00,262 ERROR asyncio Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x12d4fa270>, 358623.866223375)])']
+connector: <aiohttp.connector.TCPConnector object at 0x12d846a20>
+2025-12-01 22:34:00,262 ERROR asyncio Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x12d4fa030>, 358614.052406333)])']
+connector: <aiohttp.connector.TCPConnector object at 0x10a30eea0>
+2025-12-01 22:37:53,742 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:37:53,742 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:37:53,747 WARNING root Failed to preload memory for query: Find recent arXiv papers about "federated learning" and give a short 2-sentence summary.
+2025-12-01 22:37:53,812 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:37:55,112 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:37:55,112 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-12-01 22:37:55,288 WARNING root Failed to preload memory for query: Find recent arXiv papers about "federated learning" and give a short 2-sentence summary.
+2025-12-01 22:37:55,288 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:37:56,679 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:37:56,731 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:37:59,152 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:37:59,154 WARNING root Failed to preload memory for query: Find arXiv papers about "qwertyuiop_nonexistent_topic_12345" and summarize.
+2025-12-01 22:37:59,154 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:38:00,705 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:38:00,705 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-12-01 22:38:01,193 WARNING root Failed to preload memory for query: Find arXiv papers about "qwertyuiop_nonexistent_topic_12345" and summarize.
+2025-12-01 22:38:01,193 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:38:02,230 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:38:02,231 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:38:03,815 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:38:04,051 ERROR asyncio Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x1395451c0>
+2025-12-01 22:38:04,051 ERROR asyncio Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x139546a50>
+2025-12-01 22:38:04,051 ERROR asyncio Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x1393ef230>, 358867.629932208)])']
+connector: <aiohttp.connector.TCPConnector object at 0x139546990>
+2025-12-01 22:38:04,051 ERROR asyncio Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x1393eedb0>, 358866.0442075)])']
+connector: <aiohttp.connector.TCPConnector object at 0x1395450a0>
+2025-12-01 22:39:26,629 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:39:26,629 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:39:29,332 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:39:29,332 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:39:29,337 WARNING root Failed to preload memory for query: Find recent arXiv papers about "federated learning" and give a short 2-sentence summary.
+2025-12-01 22:39:29,401 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:39:30,344 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:39:30,344 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-12-01 22:39:30,487 WARNING root Failed to preload memory for query: Find recent arXiv papers about "federated learning" and give a short 2-sentence summary.
+2025-12-01 22:39:30,487 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:39:31,266 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:39:31,313 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:39:33,388 INFO google_genai._api_client Retrying google.genai._api_client.BaseApiClient._async_request_once in 1.813129906968042 seconds as it raised ServerError: 503 UNAVAILABLE. {'error': {'code': 503, 'message': 'The model is overloaded. Please try again later.', 'status': 'UNAVAILABLE'}}.
+2025-12-01 22:39:40,003 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:39:40,004 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-12-01 22:39:40,005 INFO researcher_assistant [summarizer_tool] called; query_len=18 docs_len=3
+2025-12-01 22:39:42,133 INFO researcher_assistant [summarizer_tool] summarizer returned summary_len=550 papers_len=3
+2025-12-01 22:39:42,133 INFO researcher_assistant [summarizer_tool] first_paper_has_link=True
+2025-12-01 22:39:42,133 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:39:44,593 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:39:44,595 WARNING root Failed to preload memory for query: Find arXiv papers about "qwertyuiop_nonexistent_topic_12345" and summarize.
+2025-12-01 22:39:44,595 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:39:46,012 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:39:46,012 WARNING google_genai.types Warning: there are non-text parts in the response: ['function_call'], returning concatenated text result from text parts. Check the full candidates.content.parts accessor to get the full model response.
+2025-12-01 22:39:46,109 WARNING root Failed to preload memory for query: Find arXiv papers about "qwertyuiop_nonexistent_topic_12345" and summarize.
+2025-12-01 22:39:46,109 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:39:47,548 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:39:47,549 INFO google_adk.google.adk.models.google_llm Sending out request, model: gemini-2.5-flash-lite, backend: GoogleLLMVariant.GEMINI_API, stream: False
+2025-12-01 22:39:49,444 INFO google_adk.google.adk.models.google_llm Response received from the model.
+2025-12-01 22:39:49,660 ERROR asyncio Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x143541e80>
+2025-12-01 22:39:49,660 ERROR asyncio Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x14252e4b0>
+2025-12-01 22:39:49,660 ERROR asyncio Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x1421fa4b0>, 358973.256796041)])']
+connector: <aiohttp.connector.TCPConnector object at 0x14252dee0>
+2025-12-01 22:39:49,660 ERROR asyncio Unclosed connector
+connections: ['deque([(<aiohttp.client_proto.ResponseHandler object at 0x1425ef1d0>, 358971.361093208)])']
+connector: <aiohttp.connector.TCPConnector object at 0x143541e20>
+2025-12-01 22:41:13,739 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:41:13,739 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:41:21,415 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:41:21,415 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
+2025-12-01 22:42:38,751 INFO researcher_assistant preload_tool: ['custom_metadata', 'description', 'from_config', 'is_long_running', 'name', 'process_llm_request', 'run_async']
+2025-12-01 22:42:38,751 INFO researcher_assistant memory_service: ['add_session_to_memory', 'search_memory']
